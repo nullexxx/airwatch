@@ -33,7 +33,8 @@
  *   short-short-LONG   new HIGH target  (police-specific signature, direct)
  *   short-short        new LOW target   (broad vendor / in-vehicle router /
  *                                        traffic addressed to a HIGH prefix)
- *   single tick        new ECHO target  (traffic addressed to a LOW prefix)
+ *   single tick        new ECHO / MINOR target (traffic addressed to a LOW
+ *                      prefix, or a drone: Remote ID broadcast or Skydio)
  *                      or new QUIET target (see QUIET TARGETS below)
  *   tick-tick ...      heartbeat while a HIGH target is in range
  *   tick ...           heartbeat while a LOW target is in range
@@ -439,8 +440,9 @@ constexpr int RSSI_LED_MAX                    = -35;
 
 enum TargetCategory : uint8_t {
   CAT_HIGH_CONF = 0,   // vendor/pattern that is specific to law enforcement
-  CAT_LOW_CONF  = 1    // broad vendor, in-vehicle router, or unconfirmed
-};
+  CAT_LOW_CONF  = 1,   // broad vendor, in-vehicle router, or unconfirmed
+  CAT_MINOR     = 2    // worth a single tick only, never more (drones)
+};                     // lower value = stronger
 
 enum MatchMode : uint8_t {
   MATCH_EXACT,
@@ -487,7 +489,8 @@ enum ReasonCode : uint16_t {
   REASON_BLE_COMPANY    = 0x0800,
   REASON_BLE_SERVICE    = 0x1000,
   REASON_BLE_NAME       = 0x2000,
-  REASON_FLEET_SSID     = 0x4000   // broadcast a Fire/EMS/transit network name
+  REASON_FLEET_SSID     = 0x4000,  // broadcast a Fire/EMS/transit network name
+  REASON_DRONE          = 0x8000   // drone: Remote ID broadcast or drone-maker address
 };
 
 enum SourceRadio : uint8_t {
@@ -569,10 +572,22 @@ const MacPrefixTarget prefixTargets[] = {
   {0x10746FULL,    24, "Motorola Solutions", CAT_LOW_CONF},
   {0xB8E28CULL,    24, "Motorola Solutions", CAT_LOW_CONF},
   {0x002075ULL,    24, "Motorola Comms",     CAT_LOW_CONF},  // Motorola Communication Israel
+  {0x9C862BULL,    24, "Motorola Solutions", CAT_LOW_CONF},  // Motorola Solutions Malaysia  [registry]
+
+  // Unconfirmed Axon addresses listed by SquachWatch-CYD. E4:05:40 is not in
+  // the IEEE registry at all; 28:24:FF belongs to WNC, a contract maker that
+  // builds for many brands. LOW so the logs can show whether they earn it.
+  {0xE40540ULL,    24, "Axon? (unreg.)",     CAT_LOW_CONF},
+  {0x2824FFULL,    24, "Axon? (WNC)",        CAT_LOW_CONF},
 
   // Rugged terminals / in-car video
   {0x001987ULL,    24, "Panasonic Mobile",   CAT_LOW_CONF},  // Panasonic Mobile Communications
   {0x008045ULL,    24, "Panasonic",          CAT_LOW_CONF},  // Matsushita Electric
+  {0x54CD10ULL,    24, "Panasonic Mobile",   CAT_LOW_CONF},  // Panasonic Mobile Comms   [registry]
+  {0xD8B12AULL,    24, "Panasonic Mobile",   CAT_LOW_CONF},  // Panasonic Mobile Comms   [registry]
+  {0xB8208EULL,    24, "Panasonic Connect",  CAT_LOW_CONF},  // Toughbook maker          [registry]
+  {0x4C364EULL,    24, "Panasonic Connect",  CAT_LOW_CONF},  // Toughbook maker          [registry]
+  {0xBC3E0BULL,    24, "Panasonic Connect",  CAT_LOW_CONF},  // Toughbook maker          [registry]
   {0xD42DC5ULL,    24, "i-PRO Camera",       CAT_LOW_CONF},  // i-PRO                  [new]
   {0x9C83BFULL,    24, "PRO-Vision Video",   CAT_LOW_CONF},  // PRO-Vision             [new]
   {0x001570ULL,    24, "Zebra Device",       CAT_LOW_CONF},  // Zebra Technologies
@@ -594,6 +609,12 @@ const MacPrefixTarget prefixTargets[] = {
   {0x001F9CULL,    24, "Havis Dock",         CAT_LOW_CONF},  // Havis                  [new]
   {0x70B3D5983ULL, 36, "Havis Dock",         CAT_LOW_CONF},  // Havis (MA-S)           [new]
   {0x68DA73BULL,   28, "Gamber-Johnson",     CAT_LOW_CONF},  // Gamber-Johnson (MA-M)  [new]
+  {0x8C1F6442BULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},  // MA-S blocks           [registry]
+  {0x8C1F64CB5ULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},
+  {0x8C1F6404CULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},
+  {0x70B3D5178ULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},
+  {0x70B3D5DBCULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},
+  {0x70B3D5E34ULL, 36, "Gamber-Johnson",     CAT_LOW_CONF},
 
   // In-vehicle cellular routers (also buses, utility trucks, kiosks)
   {0x003044ULL,    24, "Cradlepoint GW",     CAT_LOW_CONF},
@@ -605,10 +626,14 @@ const MacPrefixTarget prefixTargets[] = {
   {0xCC934AULL,    24, "Sierra AirLink",     CAT_LOW_CONF},
   {0x84DB2FULL,    24, "Sierra AirLink",     CAT_LOW_CONF},
   {0x00116EULL,    24, "Peplink Router",     CAT_LOW_CONF},
+  {0x6CA3D3ULL,    24, "Peplink Router",     CAT_LOW_CONF},  // Peplink International   [registry]
   {0xD413F8ULL,    24, "Peplink Router",     CAT_LOW_CONF},
   {0x1056CAULL,    24, "Peplink Router",     CAT_LOW_CONF},
   {0x001ADDULL,    24, "Pepwave Router",     CAT_LOW_CONF},  // PePWave                [new]
-  {0xA8C0EAULL,    24, "Pepwave Router",     CAT_LOW_CONF}   // Pepwave Limited        [new]
+  {0xA8C0EAULL,    24, "Pepwave Router",     CAT_LOW_CONF},  // Pepwave Limited        [new]
+
+  // --- MINOR: one tick only ---
+  {0x381D14ULL,    24, "Skydio Drone",       CAT_MINOR}      // Skydio: police drone programs
 };
 constexpr size_t NUM_PREFIX_TARGETS = sizeof(prefixTargets) / sizeof(prefixTargets[0]);
 
@@ -714,6 +739,21 @@ constexpr size_t NUM_BLE_PHONE_SERVICE_IDS = sizeof(blePhoneServiceIds) / sizeof
 // one of them was caught using TASER's company ID (false HIGH alert, Nov
 // 2026). A company-ID-only match that also carries this stays LOW ("maybe").
 constexpr uint16_t BLE_WEARABLE_SERVICE = 0x0AF0;
+
+// Drone Remote ID (ASTM F3411, required on most US drones): over Bluetooth,
+// service data for UUID 0xFFFA with app code 0x0D; over Wi-Fi, a beacon
+// vendor element with OUI FA:0B:BC, type 0x0D. Logged and given one tick
+// (MINOR), never more: hobby drones send it too.
+constexpr uint16_t BLE_REMOTE_ID_SERVICE = 0xFFFA;
+constexpr uint8_t  REMOTE_ID_APP_CODE    = 0x0D;
+constexpr uint32_t WIFI_REMOTE_ID_OUI    = 0xFA0BBC;
+const char* const  DRONE_LABEL           = "Drone (Remote ID)";
+
+// Axon body camera: puts the text BWCDEVICE in its own Bluetooth advert
+// (seen reversed, inside a little-endian 128-bit UUID). Address-independent,
+// so it still works when the camera changes its address. From SquachWatch-CYD.
+const char* const  AXON_BWC_TAG          = "BWCDEVICE";
+const char* const  AXON_BWC_LABEL        = "Axon Body Cam";
 
 const WPSTarget wpsTargets[] = {
   {"CRADLEPOINT", "Cradlepoint HW",    CAT_LOW_CONF,  MATCH_SUBSTRING},
@@ -883,6 +923,7 @@ struct IeParseResult {
   bool             structurallyComplete;
   size_t           bytesConsumed;
   uint16_t         ieCount;
+  bool             remoteId;        // drone Remote ID vendor element present
 };
 
 // One observation of a target, from either radio.
@@ -1110,6 +1151,8 @@ volatile uint32_t headerDrops           = 0;
 volatile uint32_t ieFramesOverCaptureLimit = 0;
 volatile uint32_t bleAdvertsSeen        = 0;
 volatile uint32_t bleMatches            = 0;
+volatile uint32_t bleAxonBwcHits        = 0;     // Axon body-cam tag adverts
+volatile uint32_t bleRemoteIdHits       = 0;     // drone Remote ID adverts (Bluetooth)
 volatile uint32_t bleDrops              = 0;
 
 volatile uint32_t ieDistribution[3][6]  = {{0}};
@@ -1710,6 +1753,8 @@ static void parseRawIEsSingle(const uint8_t* data, size_t len, IeParseResult& ou
                                  (static_cast<uint32_t>(tagPayload[1]) << 8)  |
                                   static_cast<uint32_t>(tagPayload[2]);
 
+      if (vendorOui == WIFI_REMOTE_ID_OUI && tagPayload[3] == REMOTE_ID_APP_CODE) out.remoteId = true;
+
       // Wi-Fi Alliance WPS: OUI 00:50:F2 Subtype 0x04
       if (vendorOui == 0x0050F2 && tagPayload[3] == 0x04) {
         if (out.wpsStart == -1) {
@@ -1896,6 +1941,7 @@ static void formatReasonCodes(uint16_t mask, char* out, size_t cap) {
   if (mask & REASON_BLE_SERVICE)    strlcat(out, "BLE_SVC|", cap);
   if (mask & REASON_BLE_NAME)       strlcat(out, "BLE_NAME|", cap);
   if (mask & REASON_FLEET_SSID)     strlcat(out, "FLEET_SSID|", cap);
+  if (mask & REASON_DRONE)          strlcat(out, "DRONE|", cap);
   if (mask & REASON_ECHO)           strlcat(out, "ECHO|", cap);
   if (mask & REASON_DATA_FRAME)     strlcat(out, "DATA", cap);
   strlcat(out, "]", cap);
@@ -3227,7 +3273,7 @@ void wifi_promiscuous_handler(void* buf, wifi_promiscuous_pkt_type_t type) {
       // from an address we do not track: multi-SSID routers send them from a
       // derived BSSID (02:30:44:... next to the Cradlepoint 00:30:44:...), and
       // silencing that one silences its sibling radios too.
-      if (!prefixHit && !ssidHit && !ignoredSsid && parsed.wpsMatch == nullptr) {
+      if (!prefixHit && !ssidHit && !ignoredSsid && !parsed.remoteId && parsed.wpsMatch == nullptr) {
         bump(mgmtFramesFiltered);
         return;
       }
@@ -3305,7 +3351,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
                                     const WPSTarget* wpsMatch, size_t matchedWpsIdx,
                                     bool isWildcardProbe,
                                     const char* ssidText,
-                                    uint32_t now) {
+                                    uint32_t now, bool isRemoteId = false) {
   size_t matchedPrefixIdx2 = 0;
   const MacPrefixTarget* prefixMatch2 = matchEligiblePrefixMac(event.addr2, &matchedPrefixIdx2);
 
@@ -3374,7 +3420,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
   if (wpsMatch)     { ++wpsHitsTotal;    wpsTargetHits[matchedWpsIdx]++; }
 
   // --- The transmitter itself: one frame is enough. ---
-  if ((prefixMatch2 || ssidMatch || wpsMatch) && !isGroupMac(event.addr2)) {
+  if ((prefixMatch2 || ssidMatch || wpsMatch || isRemoteId) && !isGroupMac(event.addr2)) {
     Sighting s{};
     memcpy(s.mac, event.addr2, 6);
     s.src     = SRC_WIFI;
@@ -3388,15 +3434,24 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
     s.ssid     = s.ssidSeen ? ssidText : nullptr;   // its own name, not one it is asking for
 
     bool high = false;
+    bool low  = false;    // otherwise only MINOR evidence (drone): one tick
     if (prefixMatch2) {
       if (prefixMatch2->category == CAT_HIGH_CONF) {
         high = true;
         s.reasons |= REASON_PREFIX_HIGH;
         considerLabel(s, prefixMatch2->label, LABEL_RANK_HIGH_PRF);
+      } else if (prefixMatch2->category == CAT_MINOR) {
+        s.reasons |= REASON_PREFIX_LOW | REASON_DRONE;
+        considerLabel(s, prefixMatch2->label, LABEL_RANK_ECHO);
       } else {
+        low = true;
         s.reasons |= REASON_PREFIX_LOW;
         considerLabel(s, prefixMatch2->label, LABEL_RANK_LOW);
       }
+    }
+    if (isRemoteId) {
+      s.reasons |= REASON_DRONE;
+      considerLabel(s, DRONE_LABEL, LABEL_RANK_ECHO);
     }
     if (ssidMatch) {
       if (ssidMatch->category == CAT_HIGH_CONF) {
@@ -3404,6 +3459,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
         s.reasons |= REASON_SSID_HIGH;
         considerLabel(s, ssidMatch->label, LABEL_RANK_HIGH_SSID);
       } else {
+        low = true;
         s.reasons |= REASON_SSID_LOW;
         considerLabel(s, ssidMatch->label, LABEL_RANK_LOW);
       }
@@ -3417,6 +3473,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
         s.reasons |= REASON_WPS_HIGH;
         considerLabel(s, wpsMatch->label, LABEL_RANK_HIGH_WPS);
       } else {
+        low = true;
         s.reasons |= REASON_WPS_LOW;
         considerLabel(s, wpsMatch->label, LABEL_RANK_LOW);
       }
@@ -3424,7 +3481,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
     if (isWildcardProbe && prefixMatch2)  s.reasons |= REASON_WILDCARD_PROBE;
     if (event.frameType == WIFI_PKT_DATA) s.reasons |= REASON_DATA_FRAME;
 
-    s.tier = high ? TIER_HIGH : TIER_LOW;
+    s.tier = high ? TIER_HIGH : low ? TIER_LOW : TIER_ECHO;
     noteSighting(s, now);
   }
 
@@ -3488,7 +3545,7 @@ static void evaluateMgmtIeEvent(const MgmtIeEvent& event, uint32_t now) {
                           parsed.wpsMatch, parsed.wpsMatchIdx,
                           isWildcardProbe,
                           ssidText,
-                          now);
+                          now, parsed.remoteId && header.subtype == 0x08);
 }
 
 // ============================================================
@@ -3521,7 +3578,8 @@ static void evaluateBleEvent(const BleEvent& event, uint32_t now) {
   s.reasons   = event.reasons;
   s.label     = event.label;
   s.labelRank = event.labelRank;
-  s.tier      = (event.category == CAT_HIGH_CONF) ? TIER_HIGH : TIER_LOW;
+  s.tier      = (event.category == CAT_HIGH_CONF) ? TIER_HIGH
+              : (event.category == CAT_LOW_CONF)  ? TIER_LOW : TIER_ECHO;
   s.needsSecond = event.soloCompany;
   noteSighting(s, now);
 }
@@ -3531,13 +3589,15 @@ static void evaluateBleEvent(const BleEvent& event, uint32_t now) {
 // Folds one signature match into the event being built for this advert.
 static inline void bleConsider(BleEvent& ev, bool& matched, const char* label,
                                TargetCategory category, uint16_t reason) {
-  const uint8_t rank = (category == CAT_HIGH_CONF) ? LABEL_RANK_HIGH_BLE : LABEL_RANK_LOW;
+  const uint8_t rank = (category == CAT_HIGH_CONF) ? LABEL_RANK_HIGH_BLE
+                     : (category == CAT_LOW_CONF)  ? LABEL_RANK_LOW : LABEL_RANK_ECHO;
   if (!matched || rank > ev.labelRank) {
     ev.label     = label;
     ev.labelRank = rank;
   }
-  // The event starts as LOW; any HIGH signature in the advert makes it HIGH.
-  if (category == CAT_HIGH_CONF) ev.category = CAT_HIGH_CONF;
+  // The event starts as MINOR; the strongest signature in the advert wins
+  // (lower category value = stronger).
+  if (category < ev.category) ev.category = category;
   ev.reasons |= reason;
   matched = true;
 }
@@ -3565,7 +3625,7 @@ static void bleEvaluateAdvert(const NimBLEAdvertisedDevice* dev) {
   BleEvent ev{};
   for (int i = 0; i < 6; ++i) ev.mac[i] = le[5 - i];
   ev.rssi      = static_cast<int8_t>(dev->getRSSI());
-  ev.category  = CAT_LOW_CONF;
+  ev.category  = CAT_MINOR;
   ev.prefixIdx = 0xFF;
   bool matched = false;
   bool wearableService = false;
@@ -3582,7 +3642,8 @@ static void bleEvaluateAdvert(const NimBLEAdvertisedDevice* dev) {
     const MacPrefixTarget* t = matchEligiblePrefixMac(ev.mac, &idx);
     if (t) {
       ev.prefixIdx = static_cast<uint8_t>(idx);
-      bleConsider(ev, matched, t->label, t->category, REASON_BLE_ADDR);
+      bleConsider(ev, matched, t->label, t->category,
+                  REASON_BLE_ADDR | (t->category == CAT_MINOR ? REASON_DRONE : 0));
     }
   }
 
@@ -3627,6 +3688,39 @@ static void bleEvaluateAdvert(const NimBLEAdvertisedDevice* dev) {
           const uint16_t uuid16 = static_cast<uint16_t>(data[0] | (data[1] << 8));
           if (!obs.bleService) obs.bleService = uuid16;
           if (uuid16 == BLE_WEARABLE_SERVICE) wearableService = true;
+          if (uuid16 == BLE_REMOTE_ID_SERVICE && dataLen >= 3 && data[2] == REMOTE_ID_APP_CODE) {
+            bump(bleRemoteIdHits);
+            bleConsider(ev, matched, DRONE_LABEL, CAT_MINOR, REASON_DRONE);
+          }
+          bleCheckService(ev, matched, uuid16);
+        }
+        break;
+      }
+      // The same 16-bit IDs can also arrive in their long forms: a 32-bit
+      // UUID with zero upper half, or a 128-bit UUID on the Bluetooth base
+      // (0000xxxx-0000-1000-8000-00805F9B34FB). Axon's are checked there too.
+      case 0x04:     // incomplete list of 32-bit service UUIDs
+      case 0x05:     // complete list of 32-bit service UUIDs
+      case 0x20: {   // service data, 32-bit UUID first
+        const size_t step = (adType == 0x20) ? dataLen : 4;
+        for (size_t i = 0; i + 4 <= dataLen && step >= 4; i += step) {
+          if (data[i + 2] || data[i + 3]) continue;
+          const uint16_t uuid16 = static_cast<uint16_t>(data[i] | (data[i + 1] << 8));
+          if (!obs.bleService) obs.bleService = uuid16;
+          bleCheckService(ev, matched, uuid16);
+        }
+        break;
+      }
+      case 0x06:     // incomplete list of 128-bit service UUIDs
+      case 0x07:     // complete list of 128-bit service UUIDs
+      case 0x21: {   // service data, 128-bit UUID first
+        static const uint8_t kBase[12] = {0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00,
+                                          0x00, 0x80, 0x00, 0x10, 0x00, 0x00};
+        const size_t step = (adType == 0x21) ? dataLen : 16;
+        for (size_t i = 0; i + 16 <= dataLen && step >= 16; i += step) {
+          if (memcmp(data + i, kBase, 12) != 0 || data[i + 14] || data[i + 15]) continue;
+          const uint16_t uuid16 = static_cast<uint16_t>(data[i + 12] | (data[i + 13] << 8));
+          if (!obs.bleService) obs.bleService = uuid16;
           bleCheckService(ev, matched, uuid16);
         }
         break;
@@ -3652,6 +3746,23 @@ static void bleEvaluateAdvert(const NimBLEAdvertisedDevice* dev) {
         break;
     }
     pos += 1 + static_cast<size_t>(fieldLen);
+  }
+
+  // 3) Axon body-camera tag anywhere in the raw advert, forwards or reversed.
+  if (total >= 9) {
+    const uint8_t* raw = payload.data();
+    for (size_t i = 0; i + 9 <= total; ++i) {
+      bool fw = true, bw = true;
+      for (size_t k = 0; k < 9 && (fw || bw); ++k) {
+        if (raw[i + k] != static_cast<uint8_t>(AXON_BWC_TAG[k]))     fw = false;
+        if (raw[i + k] != static_cast<uint8_t>(AXON_BWC_TAG[8 - k])) bw = false;
+      }
+      if (fw || bw) {
+        bump(bleAxonBwcHits);
+        bleConsider(ev, matched, AXON_BWC_LABEL, CAT_HIGH_CONF, REASON_BLE_SERVICE);
+        break;
+      }
+    }
   }
 
   // A HIGH match that rests on the company ID alone (no Axon service, name
@@ -4045,6 +4156,10 @@ static void printSignatureTelemetry() {
                     static_cast<unsigned long>(bleServiceTargetHits[i]));
     }
   }
+  if (bleAxonBwcHits)  Console.printf("  BWCDEVICE tag        (%-16s) : %lu adverts\n", AXON_BWC_LABEL,
+                                      static_cast<unsigned long>(bleAxonBwcHits));
+  if (bleRemoteIdHits) Console.printf("  Remote ID 0xFFFA     (%-16s) : %lu adverts\n", "Drone",
+                                      static_cast<unsigned long>(bleRemoteIdHits));
   for (size_t i = 0; i < NUM_BLE_NAME_TARGETS; ++i) {
     if (bleNameTargetHits[i] > 0) {
       Console.printf("  name %-15s (%-16s) : %lu hits\n",

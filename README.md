@@ -52,10 +52,14 @@ it hears. The one exception is the web page, which needs the board's own Wi-Fi
   (weighted to 1/6/11) while a passive BLE scan runs alongside it.
 - **Three alert levels.**
   - **POLICE (HIGH):** police-specific signatures, such as Axon / WatchGuard
-    network names, TASER/Axon Bluetooth and rugged-laptop WPS names.
+    network names, TASER/Axon Bluetooth (including the `BWCDEVICE` tag Axon
+    body cameras broadcast, which works even when they change address) and
+    rugged-laptop WPS names.
   - **MAYBE (LOW):** in-vehicle router vendors (Cradlepoint, Sierra, Peplink) and
     broad matches.
-  - **MINOR (ECHO):** traffic addressed to a matching device.
+  - **MINOR (ECHO):** traffic addressed to a matching device, and drones: the
+    Remote ID most drones must broadcast (Wi-Fi and Bluetooth), and Skydio's
+    addresses. One tick only, since hobby drones count too.
 - **Proximity heartbeat.** It ticks faster as the signal gets stronger.
 - **Fleet filter.** Fire, EMS, transit and school-bus routers are recognised by
   their network names and silenced, along with their sibling radios. A
@@ -353,6 +357,24 @@ The signature tables are near the top of `airwatch_v2.ino`:
 | `bleCompanyTargets`, `bleServiceTargets`, `bleNameTargets` | Bluetooth |
 | `ignoredSsidTargets` | Fire, EMS, transit and school fleets (silenced) |
 | `quietSsidTargets` | factory-named branch or kiosk routers (one tick only) |
+
+Some signatures are built into the code rather than a table:
+- the Axon body-camera tag (`AXON_BWC_TAG`);
+- drone Remote ID (`BLE_REMOTE_ID_SERVICE`, `WIFI_REMOTE_ID_OUI`).
+
+Bluetooth service IDs are matched in their short (16-bit) form and in their long
+32- and 128-bit forms. A table entry can be `CAT_HIGH_CONF` (POLICE),
+`CAT_LOW_CONF` (MAYBE) or `CAT_MINOR` (one tick only). Every MAC prefix in the
+table has been checked against the
+[IEEE registry](https://standards-oui.ieee.org/oui/oui.csv). The two marked
+`Axon?` are unconfirmed and kept at MAYBE so the logs can show whether they
+earn it.
+
+Several signatures came from other open projects:
+- [SquachWatch-CYD](https://github.com/skizzophrenic/SquachWatch-CYD): the Axon
+  `BWCDEVICE` tag.
+- [OUI-SPY](https://github.com/colonelpanichacks/oui-spy-unified-blue): Axon's
+  Bluetooth IDs and the Remote ID formats.
 
 Each mark line carries what you need to write a new signature: the full network
 name, the WPS strings, the vendor codes in the beacon (`vie=`), who the device was

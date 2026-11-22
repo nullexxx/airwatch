@@ -326,8 +326,11 @@ What goes where:
 | SMA bulkhead | A hole in the top. |
 | Lid | Three M3 screws into heat-set inserts (Ruthex RX-M3x5.7, 4.0 mm holes). |
 
-The parts are already turned the way they print. Pick one with `part` in the file,
-or from a terminal:
+Ready-to-print STLs of v4.3 are in `case/`: `airwatch_shell.stl` and
+`airwatch_lid.stl`, already turned the way they print.
+
+To export them yourself after changing the design, pick a part with `part` in the
+file, or from a terminal:
 
 ```bash
 openscad -o shell.stl -D 'part="shell"' case/airwatch_case.scad
@@ -369,6 +372,9 @@ airwatch_v2/
   secrets.example.h     copy to secrets.h for the web page
 case/
   airwatch_case.scad    3D-printable case (OpenSCAD, v4.3)
+  airwatch_shell.stl    ready to print: shell (front face down)
+  airwatch_lid.stl      ready to print: lid (outside face down)
+docs/images/            photos of the finished build
 ```
 
 ## License

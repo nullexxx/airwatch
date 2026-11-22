@@ -7,9 +7,11 @@ build/
 *.elf
 *.map
 
-# Case exports (generate from the .scad)
+# Case exports (generate from the .scad); the ready-made ones in case/ are kept
 *.stl
 *.3mf
+!case/airwatch_shell.stl
+!case/airwatch_lid.stl
 
 # Editors / OS
 .vscode/

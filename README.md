@@ -68,7 +68,7 @@ it hears. The one exception is the web page, which needs the board's own Wi-Fi
   - Tap means "police are there".
   - Hold for about a second means "nothing is there".
   - Each mark saves everything heard in the last 30 s, plus anything that alerted
-    in the last 15 min.
+    in the last 90 s.
   - Three quick taps mute or unmute the alerts.
 - **Alert journal.** Every alert is logged automatically when it ends: when, what,
   peak signal, how long, and where.
@@ -221,10 +221,17 @@ It brightens as the signal gets stronger. Type `led` to run a colour test.
 **At home.** When the board has heard your home network for about 3 s, it pauses
 Wi-Fi listening (Bluetooth keeps running) and joins it. Open
 <http://airwatch.local>, or the address shown on the screen.
-- It goes back to listening about 5 s after you drive out of range, when you press
-  Exit, or after 15 minutes with no page requests.
-- After Exit or the idle timeout, it waits until you have been away for 5 minutes
-  before joining again.
+- It goes back to listening when any of these happens:
+  - about 5 s after you drive out of range (a connection that drops and comes
+    back counts as leaving unless it stays up for 10 s);
+  - straight away if the GPS shows you driving (10 mph or more for 3 s);
+  - when joining hasn't worked within 20 s;
+  - when you press Exit;
+  - after 15 minutes with no page requests.
+- After that it stays out of home mode until you have been away for 5 minutes,
+  or the power is cycled. So it won't grab your Wi-Fi again at the end of the
+  street.
+- While the GPS shows you driving, it doesn't enter home mode at all.
 - Your phone must be able to reach it: client isolation on an "IoT" network or a
   separate VLAN will block the page.
 

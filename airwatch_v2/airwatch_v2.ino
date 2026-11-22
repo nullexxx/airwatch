@@ -70,7 +70,7 @@
  *   Wire a push button between D1 and GND, or use the board's own BOOT
  *   button. Each press saves everything heard in the last 30 seconds -
  *   matched or not, Wi-Fi and BLE - plus whatever was alerting, to the
- *   board's flash. Anything that alerted in the last 15 minutes is listed
+ *   board's flash. Anything that alerted in the last 90 seconds is listed
  *   too (EARLIER lines), so a late press still records what the beep was.
  *   Marks survive power loss.
  *   Each line carries what is needed to build a new signature later: full
@@ -114,12 +114,16 @@
  *   log (view, filter, download, erase), matched devices, and wireless
  *   firmware updates. Bluetooth detection and the mark button keep working.
  *   It reboots back into passive listening when the home network is out of
- *   reach or very weak for about 5 s (you drove off), after MAINT_IDLE_MS
- *   (15 min) without a page request, or when you press Exit on the page.
- *   After Exit, the idle timeout, a failed join or a crash it will not open
- *   the page again by itself while you are still parked at home: it waits
- *   until it has not heard your home network for HOME_RELEASE_MS (5 min),
- *   i.e. you drove away and came back. Driving off needs no wait.
+ *   reach or very weak for about 5 s (you drove off; a link that drops and
+ *   comes back counts as leaving unless it stays up 10 s), as soon as the
+ *   GPS shows you driving (10+ mph for 3 s), when a join has not worked
+ *   within 20 s, after MAINT_IDLE_MS (15 min) without a page request, or when
+ *   you press Exit on the page. With the GPS showing you driving it does not
+ *   enter home mode at all.
+ *   After any of these (or a crash) it will not open the page again by
+ *   itself until it has not heard your home network for HOME_RELEASE_MS
+ *   (5 min), i.e. you drove away and came back. A power cycle also re-arms
+ *   it.
  *   HOME_WIFI_BSSID may list several access points (a mesh), separated by
  *   commas; it joins whichever of them is strongest.
  *   The phone must be able to reach the board: on a UniFi "IoT" network
@@ -369,8 +373,12 @@ constexpr size_t MAX_BLE_NAME_LEN             = 31;
 
 // --- Mark log ---
 constexpr uint32_t MARK_WINDOW_MS             = 30000;   // how far back a mark reaches
-// Alerts are remembered much longer, so "it beeped a few minutes ago, what
-// was that?" can still be answered by a late button press.
+// A mark also lists alerts that ended shortly before the press (EARLIER
+// lines), for a press that comes a little late. Kept short: at driving speed
+// anything older is far behind you.
+constexpr uint32_t MARK_EARLIER_MS            = 90000;
+// The screen's "last alert" line and the web page's device list look back
+// further: that is for review, not for marks.
 constexpr uint32_t MARK_HISTORY_MS            = 15UL * 60UL * 1000UL;
 // Distinct transmitters remembered. With PSRAM (XIAO ESP32-S3: add
 // :PSRAM=opi to the board name) the table lives there and is four times
@@ -415,7 +423,10 @@ constexpr uint32_t HOME_SETTLE_MS             = 3000;    // home heard this long
 constexpr uint32_t HOME_GAP_MS                = 15000;   // silent this long = no longer "at home"
 constexpr int8_t   HOME_MIN_RSSI              = -85;     // ignore it when this faint
 constexpr uint32_t HOME_RELEASE_MS            = 5UL * 60UL * 1000UL;  // away this long re-arms it
-constexpr uint32_t MAINT_JOIN_TIMEOUT_MS      = 60000;   // could not join in this long: give up
+constexpr uint32_t MAINT_JOIN_TIMEOUT_MS      = 20000;   // could not join in this long: give up
+constexpr uint32_t MAINT_RECOVER_MS           = 10000;   // link must be back this long to cancel leaving
+constexpr float    HOME_DRIVING_MPH           = 10.0f;   // GPS: at least this fast ...
+constexpr uint32_t HOME_DRIVING_MS            = 3000;    // ... for this long = driving: not at home
 constexpr uint32_t MAINT_LOST_MS              = 5000;    // home network gone / very weak this long: leave
 constexpr int      HOME_LEAVE_RSSI            = -88;     // this weak counts as gone (driving away)
 constexpr uint32_t ROAD_WINDOW_MS             = 15000;   // road access: hold the button within this of power-up
@@ -2029,12 +2040,27 @@ static TrackedDevice* resolveDevice(const uint8_t mac[6], uint32_t now, bool& ne
 
   newEncounter = true;
 
+  // A free slot first. Then a stale one (silent for ENCOUNTER_GAP_MS),
+  // preferring one past MARK_HISTORY_MS, which nothing reads any more, and
+  // otherwise the one silent longest: recent alerts stay for EARLIER lines
+  // and the web page.
+  size_t stale = DEVICE_CACHE_SIZE;
+  uint32_t staleAge = 0;
   for (size_t i = 0; i < DEVICE_CACHE_SIZE; ++i) {
     TrackedDevice& d = deviceCache[i];
-    if (!d.valid || ((now - d.lastSeen) >= ENCOUNTER_GAP_MS)) {
+    if (!d.valid) {
       startEncounter(d, mac, now);
       return &d;
     }
+    const uint32_t age = now - d.lastSeen;
+    if (age >= ENCOUNTER_GAP_MS && (stale == DEVICE_CACHE_SIZE || age > staleAge)) {
+      stale = i;
+      staleAge = age;
+    }
+  }
+  if (stale < DEVICE_CACHE_SIZE) {
+    startEncounter(deviceCache[stale], mac, now);
+    return &deviceCache[stale];
   }
 
   // Cache full of live entries: evict suppressed devices first, then lowest tier, then stalest.
@@ -2607,6 +2633,18 @@ static void roadEnter(uint32_t now);
 static void printResetLog();
 static void serviceCore();   // one pass of listening / alerting / hopping (defined near loop())
 
+#if HOME_SYNC
+// True once a fresh GPS fix has shown HOME_DRIVING_MPH or more for
+// HOME_DRIVING_MS: you are driving, so this is not "at home". Without a GPS
+// (or a fix) it is always false and the Wi-Fi signal decides.
+static bool homeDriving(uint32_t now) {
+  static uint32_t fastSince = 0;
+  if (!gpsFixFresh(now) || gps.speedMph < HOME_DRIVING_MPH) { fastSince = 0; return false; }
+  if (fastSince == 0) fastSince = now;
+  return (now - fastSince) >= HOME_DRIVING_MS;
+}
+#endif
+
 // Road access offer: the first ROAD_WINDOW_MS after power-up only. Latched
 // shut, so it cannot come back when millis() wraps after 49.7 days.
 static bool roadWindowOpen(uint32_t now) {
@@ -2797,7 +2835,7 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
     f.printf(" alerting=%s lead=\"%s\" in_range=%u\n",
              shownTierName(alertView.tier, alertView.quiet),
              alertView.label, static_cast<unsigned>(alertView.count));
-  } else if (lastAlertValid && (now - lastAlertAt) < MARK_HISTORY_MS) {
+  } else if (lastAlertValid && (now - lastAlertAt) < MARK_EARLIER_MS) {
     // Nothing is alerting now, but something was moments ago.
     f.printf(" alerting=NONE last_alert=%s last_lead=\"%s\" ended_ago=%lums\n",
              shownTierName(lastAlert.tier, lastAlert.quiet), lastAlert.label,
@@ -2871,8 +2909,8 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
   // knows from traffic addressed to them (those never appear above).
   for (size_t k = 0; k < DEVICE_CACHE_SIZE; ++k) {
     const TrackedDevice& d = deviceCache[k];
-    if (!d.valid || (now - d.lastSeen) >= MARK_HISTORY_MS) continue;
-    // ALERT = seen within the mark window; EARLIER = older, up to 15 minutes.
+    if (!d.valid || (now - d.lastSeen) >= MARK_EARLIER_MS) continue;
+    // ALERT = seen within the mark window; EARLIER = older, up to 90 seconds.
     const bool current = (now - d.lastSeen) < MARK_WINDOW_MS;
 
     char why[112];
@@ -4519,7 +4557,7 @@ th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertic
  <div class="card" style="margin-top:10px"><h3 style="margin-top:0">Alert journal and GPS</h3>
  <p class="msg" style="margin:0">Every alert is saved on its own when it ends (Marks → Alert journal), no button needed. It keeps about 1,400 alerts and drops the oldest. With a GPS on D7, marks and alerts get the real time and a map link; each alert's map point is where its signal was strongest.</p></div>
  <div class="card" style="margin-top:10px"><h3 style="margin-top:0">Web page</h3>
- <p class="msg" style="margin:0">At home it opens by itself after your Wi-Fi has been in view for a few seconds: http://airwatch.local or the address on the screen. It goes back to listening about 5 s after you drive out of range, on Exit, or after 15 min idle. Console commands: h help · t telemetry (includes GPS) · r restart / crash history · d devices · s signature hits · m mute · led LED test · 1/2/3 dwell · x leave.</p></div>
+ <p class="msg" style="margin:0">At home it opens by itself after your Wi-Fi has been in view for a few seconds: http://airwatch.local or the address on the screen. It goes back to listening about 5 s after you drive out of range (at once if the GPS shows you driving), if joining fails for 20 s, on Exit, or after 15 min idle. After that it stays out of home mode until you have been away 5 min, or the power is cycled. Console commands: h help · t telemetry (includes GPS) · r restart / crash history · d devices · s signature hits · m mute · led LED test · 1/2/3 dwell · x leave.</p></div>
 </section>
 <section id="fw">
  <div class="card"><div class="k">Running build</div><div class="v" id="build">…</div></div>
@@ -5262,12 +5300,22 @@ static void maintTick(uint32_t now) {
 #if HOME_SYNC
   if (!maintRoad) {
     const bool up = (WiFi.status() == WL_CONNECTED);
-    static uint32_t lostSince = 0;
+    static uint32_t lostMs    = 0;     // time without a usable link in this episode
+    static uint32_t goodSince = 0;
+    static uint32_t lastTick  = now;
+    const uint32_t step = now - lastTick;
+    lastTick = now;
+    // GPS says we are driving: leave at once, joined or still joining.
+    if (homeDriving(now)) {
+      Console.println(F("[HOME] GPS shows driving: back to listening"));
+      maintExit("driving away", true);
+    }
     if (!maintConnected) {
       if (up) {
         maintConnected     = true;
         maintLastRequestAt = now;
-        lostSince          = 0;
+        lostMs             = 0;
+        goodSince          = now;
         WiFi.setTxPower(WEB_TX_POWER_HOME);       // some drivers reset it on connect
         Console.printf("[HOME] joined %s (%d dBm, channel %d)\n",
                        WiFi.BSSIDstr().c_str(), static_cast<int>(WiFi.RSSI()), static_cast<int>(WiFi.channel()));
@@ -5278,21 +5326,26 @@ static void maintTick(uint32_t now) {
                           "(same network, no client isolation / IoT firewall)"));
         lastRenderedState = DisplaySnapshot{};
       } else if ((now - maintStartedAt) >= MAINT_JOIN_TIMEOUT_MS) {
-        maintExit("could not join home Wi-Fi: check secrets.h", true);
+        maintExit("could not join home Wi-Fi in 20 s (out of range, or check secrets.h)", true);
       }
       return;
     }
-    // Drove off: router gone, or so weak you are clearly leaving.
+    // Drove off: router gone, or so weak you are clearly leaving. Time
+    // without a usable link adds up across drop-outs (the edge of its range,
+    // around a corner); only MAINT_RECOVER_MS of steady link clears it.
+    // Leaving locks home mode until you have been away HOME_RELEASE_MS, so
+    // it does not grab your Wi-Fi again at the end of the street.
     const bool leaving = !up || (WiFi.RSSI() <= HOME_LEAVE_RSSI);
     if (leaving) {
-      if (lostSince == 0) lostSince = now;
-      if ((now - lostSince) >= MAINT_LOST_MS) {
-        Console.printf("[HOME] home Wi-Fi %s for 5 s: back to listening\n",
-                       up ? "very weak" : "gone");
-        maintExit("home Wi-Fi out of reach", false);
+      goodSince = 0;
+      lostMs += step;
+      if (lostMs >= MAINT_LOST_MS) {
+        Console.printf("[HOME] home Wi-Fi %s: back to listening\n", up ? "very weak" : "gone");
+        maintExit("home Wi-Fi out of reach", true);
       }
     } else {
-      lostSince = 0;
+      if (goodSince == 0) goodSince = now;
+      if (lostMs != 0 && (now - goodSince) >= MAINT_RECOVER_MS) lostMs = 0;
     }
   }
 #endif
@@ -5334,7 +5387,7 @@ static void homeTick(uint32_t now) {
     }
     return;
   }
-  if (streak && (now - streakStart) >= HOME_SETTLE_MS && !alertView.active) {
+  if (streak && (now - streakStart) >= HOME_SETTLE_MS && !alertView.active && !homeDriving(now)) {
     maintEnter(now, "home Wi-Fi in view");
   }
 }

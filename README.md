@@ -11,6 +11,17 @@ It only **listens**. It never connects to, probes or sends anything to the netwo
 it hears. The one exception is the web page, which needs the board's own Wi-Fi
 (see [Web page](#web-page)).
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/airwatch-idle.jpg" alt="AirWatch on power-up: the screen shows W36 B10 and HOLD=WEB"></td>
+    <td width="50%"><img src="docs/images/airwatch-joining.jpg" alt="AirWatch at home: the screen shows JOINING home Wi-Fi, BLE on, back in 15m"></td>
+  </tr>
+  <tr>
+    <td><b>Listening.</b> 36 Wi-Fi and 10 Bluetooth devices heard in the last 30 s. <code>HOLD=WEB</code> is the road-access offer during the first 15 s after power-up.</td>
+    <td><b>Parked at home.</b> It is joining the home Wi-Fi for the web page. Bluetooth detection stays on, and it goes back to listening within 15 min.</td>
+  </tr>
+</table>
+
 > Detections are guesses from radio signatures, not proof. Expect some false
 > alarms and some misses. The mark button and the logs exist so you can tell which
 > is which and tune the signatures. Check your local laws, and don't fiddle with it

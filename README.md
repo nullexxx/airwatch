@@ -181,7 +181,7 @@ page. To enable the web page, copy `airwatch_v2/secrets.example.h` to
 | short-short (at power-on) | running |
 | short-short-LONG | new **POLICE** target |
 | short-short | new **MAYBE** target |
-| single tick | new **MINOR** or quiet-listed target |
+| single tick | new **MINOR** target |
 | ticks while in range | heartbeat: faster = closer |
 | one long beep | mark saved: police are there |
 | two long beeps | mark saved: nothing is there |
@@ -363,7 +363,7 @@ The signature tables are near the top of `airwatch_v2.ino`:
 | `wpsTargets` | WPS device name, manufacturer and model |
 | `bleCompanyTargets`, `bleServiceTargets`, `bleNameTargets` | Bluetooth |
 | `ignoredSsidTargets` | Fire, EMS, transit and school fleets (silenced) |
-| `quietSsidTargets` | factory-named branch or kiosk routers (one tick only) |
+| `quietSsidTargets` | factory-named branch or kiosk routers: silent, but saved in marks and the journal |
 
 Some signatures are built into the code rather than a table:
 - the Axon body-camera tag (`AXON_BWC_TAG`);

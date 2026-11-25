@@ -35,7 +35,6 @@
  *                                        traffic addressed to a HIGH prefix)
  *   single tick        new ECHO / MINOR target (traffic addressed to a LOW
  *                      prefix, or a drone: Remote ID broadcast or Skydio)
- *                      or new QUIET target (see QUIET TARGETS below)
  *   tick-tick ...      heartbeat while a HIGH target is in range
  *   tick ...           heartbeat while a LOW target is in range
  *                      heartbeat rate = proximity: ~2 s apart when weak,
@@ -102,9 +101,10 @@
  * QUIET TARGETS
  *   A Cradlepoint still using its factory network name for an E-series
  *   branch router or an IBR200 kiosk gateway ("E110-dbf": model, dash,
- *   three hex digits; the models are listed in quietSsidTargets) is shown
- *   on screen and saved in marks as QUIET, but only gets one tick and no heartbeat. Its sibling radios
- *   are treated the same. Any police-specific (HIGH) signature on the same
+ *   three hex digits; the models are listed in quietSsidTargets) is silent:
+ *   no sound, LED or screen alert. It is still saved in marks (tier=QUIET)
+ *   and in the alert journal, for review. Its sibling radios are treated
+ *   the same. Any police-specific (HIGH) signature on the same
  *   device lifts the cap. Vehicle models such as IBR900 are not affected.
  *
  * HOME WI-FI MAINTENANCE MODE  (needs secrets.h - copy secrets.example.h)
@@ -710,8 +710,8 @@ const IgnoredSSIDTarget ignoredSsidTargets[] = {
 };
 constexpr size_t NUM_IGNORED_SSID_TARGETS = sizeof(ignoredSsidTargets) / sizeof(ignoredSsidTargets[0]);
 
-// Factory network names that cap a LOW match at QUIET (one tick, no
-// heartbeat). Upper case. The whole name must be this prefix followed by
+// Factory network names that cap a LOW match at QUIET (silent: logged and
+// journaled only). Upper case. The whole name must be this prefix followed by
 // exactly three hex digits - Cradlepoint's default "<model>-<last 3 of MAC>".
 // These are the E-series branch / office models; vehicle models (IBR900,
 // IBR1700, R1900 ...) are deliberately not listed. To alert normally on one
@@ -2208,6 +2208,7 @@ static void announceDevice(TrackedDevice& d, uint32_t now) {
   d.announcedTier = tier;
   if (!d.hasPos && gpsFixFresh(now)) setDevicePos(d);
   if (tier == TIER_NONE || tier > TIER_HIGH) return;
+  if (d.quietCap) return;          // quiet-list router: logged and journaled, never heard
 
   const bool rateOk = !announcedOnce[tier] ||
                       ((now - lastAnnounceAt[tier]) >= ALERT_RETRIGGER_MS);
@@ -2364,6 +2365,7 @@ static void alertTick(uint32_t now) {
     if (!timeReached(now, d.holdUntil)) continue;      // still in fleet-check grace
 
     if (d.tier > d.announcedTier) announceDevice(d, now);
+    if (d.quietCap) continue;        // silent: no screen, LED or heartbeat either
 
     if (freshCount < 255) ++freshCount;
     if (!displayLead || deviceOutranks(d, *displayLead)) displayLead = &d;

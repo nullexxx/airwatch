@@ -36,6 +36,7 @@ PORT = int(os.environ.get("AIRWATCH_PORT", "8077"))
 UI_PASSWORD = os.environ.get("AIRWATCH_UI_PASSWORD", "")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 STORE = None
+UPLOAD_LOCK = threading.Lock()   # one upload at a time: file names and all-*.log appends
 MAX_BYTES = 16 * 1024 * 1024
 KINDS = {"marks", "alerts", "samples"}
 
@@ -46,6 +47,7 @@ def log(msg):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "AirWatchReceiver/1"
+    timeout = 30   # a board that drops Wi-Fi mid-upload must not hang a thread forever
 
     def log_message(self, fmt, *args):  # quieter default logging
         pass
@@ -92,6 +94,17 @@ class Handler(BaseHTTPRequestHandler):
             log(f"short upload from {self.client_address[0]}: {len(body)} of {length} bytes")
             return self.reply(400, "short body")
 
+        with UPLOAD_LOCK:
+            path = self.save_upload(kind, drive, body)
+        crc = zlib.crc32(body) & 0xFFFFFFFF
+        log(f"saved {path} ({length} bytes, crc {crc:08x}) from {self.client_address[0]}")
+        self.reply(200, f"OK {length} {crc:08x}")
+        try:
+            STORE.ingest(path)
+        except Exception as e:  # the file is safe on disk either way
+            log(f"index: could not read {path}: {e}")
+
+    def save_upload(self, kind, drive, body):
         now = datetime.datetime.now()
         day = os.path.join(DATA, now.strftime("%Y-%m-%d"))
         os.makedirs(day, exist_ok=True)
@@ -111,14 +124,7 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(b"\n")
             f.flush()
             os.fsync(f.fileno())
-
-        crc = zlib.crc32(body) & 0xFFFFFFFF
-        log(f"saved {path} ({length} bytes, crc {crc:08x}) from {self.client_address[0]}")
-        self.reply(200, f"OK {length} {crc:08x}")
-        try:
-            STORE.ingest(path)
-        except Exception as e:  # the file is safe on disk either way
-            log(f"index: could not read {path}: {e}")
+        return path
 
     # ---- review page ----
     def authorised(self):
@@ -157,8 +163,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, f.read(), "text/html; charset=utf-8")
         if rel in api:
             return self.json(api[rel]())
+        if rel == "healthz":
+            return self.reply(200, "ok")
         if rel == "api/mark":
-            m = STORE.mark(int(q.get("id", ["0"])[0] or 0))
+            try:
+                mid = int(q.get("id", ["0"])[0] or 0)
+            except ValueError:
+                return self.reply(400, "bad id")
+            m = STORE.mark(mid)
             return self.json(m) if m else self.reply(404, "not found")
         if rel == "export":
             drives = [int(x) for x in re.findall(r"\d+", q.get("drives", [""])[0])][:200]
@@ -191,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def index(self):
         rows = []
-        for top in ("all-marks.log", "all-alerts.log"):
+        for top in ("all-marks.log", "all-alerts.log", "all-samples.log"):
             p = os.path.join(DATA, top)
             if os.path.isfile(p):
                 rows.append(("", top, os.path.getsize(p)))
@@ -219,7 +231,7 @@ if __name__ == "__main__":
     STORE = Store(DATA, vendors, log)
     STORE.ingest_all()
     # vendor lists: refresh in the background (monthly), never blocks uploads
-    threading.Thread(target=vendors.refresh, daemon=True).start()
+    threading.Thread(target=vendors.refresh_forever, daemon=True).start()
     log(f"listening on port {PORT}, saving to {DATA} (token: {len(TOKEN)} characters"
         f"{', review page password set' if UI_PASSWORD else ''})")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

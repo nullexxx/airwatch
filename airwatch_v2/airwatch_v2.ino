@@ -449,6 +449,11 @@ constexpr size_t   MARK_LOG_RESERVE_BYTES     = 64 * 1024;
 constexpr size_t   JOURNAL_FILE_MAX           = 128 * 1024;
 #define BOOT_COUNT_PATH "/boot.txt"
 #define SAMPLES_PATH    "/samples.log"
+// Copies set aside while uploading on arrival (see uploadOnArrival)
+#define MARKS_PENDING_PATH      "/marks.pending"
+#define ALERTS_PENDING_OLD_PATH "/alerts.pending.1"
+#define ALERTS_PENDING_PATH     "/alerts.pending"
+#define SAMPLES_PENDING_PATH    "/samples.pending"
 
 // --- Home Wi-Fi maintenance mode (see header) ---
 constexpr uint32_t HOME_SETTLE_MS             = 3000;    // home heard this long before joining
@@ -1888,7 +1893,8 @@ static void parseRawIEsFlexible(const uint8_t* data, size_t len, bool allowFcsTr
   parseRawIEsSingle(data, len, full);
   usedFcsTrim = false;
 
-  if (!allowFcsTrim || len < 4) {
+  // Trimming the 4-byte FCS can only help a frame that did not parse cleanly.
+  if (full.structurallyComplete || !allowFcsTrim || len < 4) {
     out = full;
     return;
   }
@@ -2337,6 +2343,10 @@ static void noteSighting(const Sighting& s, uint32_t now) {
   if (!d) return;
 
   d->lastSeen = now;
+  // Heard again after its alert was journaled (went quiet 8 s, came back
+  // within the encounter): journal it again when it ends, so a comeback or a
+  // later upgrade to HIGH is not lost. The server keeps the latest line.
+  if (d->journaled && !d->suppressed) d->journaled = false;
 
   // If this device was suppressed (e.g. broadcasting a Fire/EMS SSID), ignore
   // subsequent LOW/ECHO router OUI matches unless a HIGH police signature appears.
@@ -3122,6 +3132,8 @@ static void eraseMarkLog() {
   LittleFS.remove(JOURNAL_PATH);
   LittleFS.remove(JOURNAL_OLD_PATH);
   LittleFS.remove(SAMPLES_PATH);
+  for (const char* p : {MARKS_PENDING_PATH, ALERTS_PENDING_OLD_PATH, ALERTS_PENDING_PATH, SAMPLES_PENDING_PATH})
+    LittleFS.remove(p);   // copies left by a failed upload
   markLogRefreshUsage();
   Console.println(F("[LOG] mark log, alert journal and background samples erased"));
 }
@@ -5467,10 +5479,6 @@ static void webPrintEvents(uint32_t now) {
 // being sent go to a fresh log. The receiver answers "OK <bytes> <crc32>";
 // only an exact match deletes the pending file. Anything not confirmed stays
 // and is sent first on the next arrival.
-#define MARKS_PENDING_PATH      "/marks.pending"
-#define ALERTS_PENDING_OLD_PATH "/alerts.pending.1"
-#define ALERTS_PENDING_PATH     "/alerts.pending"
-#define SAMPLES_PENDING_PATH    "/samples.pending"
 
 static uint32_t crc32Update(uint32_t crc, const uint8_t* p, size_t n) {   // zlib-compatible
   crc = ~crc;
@@ -5581,7 +5589,9 @@ static void maintTick(uint32_t now) {
     static uint32_t lostMs    = 0;     // time without a usable link in this episode
     static uint32_t goodSince = 0;
     static uint32_t lastTick  = now;
-    const uint32_t step = now - lastTick;
+    // Capped: after a long blocking job (upload on arrival, a big log
+    // download) one weak reading must not count as seconds of being gone.
+    const uint32_t step = std::min<uint32_t>(now - lastTick, 1000UL);
     lastTick = now;
     // GPS says we are driving: leave at once, joined or still joining.
     if (homeDriving(now)) {

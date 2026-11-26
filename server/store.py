@@ -3,6 +3,7 @@
 The raw uploads under <data>/YYYY-MM-DD/ stay the source of truth. Each one is
 read into airwatch.db once; delete the database and it is rebuilt from them.
 """
+import contextlib
 import datetime
 import glob
 import json
@@ -15,7 +16,7 @@ import time
 
 import logparse
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, kind TEXT, size INTEGER, ingested REAL);
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS alerts(
   id INTEGER PRIMARY KEY, drive INT, up INT, time TEXT, tier TEXT, src TEXT, mac TEXT,
   best INT, ch INT, dur INT, seen INT, label TEXT, ssid TEXT, lat REAL, lon REAL, mph REAL,
   muted INT, ongoing TEXT, ended TEXT, why TEXT, tl TEXT,
-  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, raw TEXT, UNIQUE(drive, up, mac, tier));
+  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, raw TEXT, UNIQUE(drive, up, mac));
 CREATE INDEX IF NOT EXISTS alerts_mac ON alerts(mac);
 """
 
@@ -134,7 +135,7 @@ def name_pattern(name):
 
 def is_random(mac):
     h = (mac or "").replace(":", "")
-    return len(h) >= 2 and bool(int(h[1], 16) & 2)
+    return len(h) >= 2 and h[1] in "2367ABEFabef"   # locally administered bit
 
 
 def dist_m(a_lat, a_lon, b_lat, b_lon):
@@ -142,7 +143,7 @@ def dist_m(a_lat, a_lon, b_lat, b_lon):
     p1, p2 = math.radians(a_lat), math.radians(b_lat)
     dp, dl = p2 - p1, math.radians(b_lon - a_lon)
     h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(h))
+    return 2 * r * math.asin(math.sqrt(min(1.0, max(0.0, h))))
 
 
 class Store:
@@ -165,13 +166,21 @@ class Store:
                 os.remove(self.path)
                 log(f"index: format changed (v{v[0]} -> v{SCHEMA_VERSION}), rebuilding from the uploads")
         with self.db() as c:
+            c.execute("PRAGMA journal_mode=WAL")      # readers don't wait for an upload being indexed
+            c.execute("PRAGMA synchronous=NORMAL")
             c.executescript(SCHEMA)
             c.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (str(SCHEMA_VERSION),))
 
+    @contextlib.contextmanager
     def db(self):
+        """A connection that commits (or rolls back) and is always closed."""
         c = sqlite3.connect(self.path, timeout=30)
         c.row_factory = sqlite3.Row
-        return c
+        try:
+            with c:
+                yield c
+        finally:
+            c.close()
 
     # ---------------- ingest ----------------
     def ingest_all(self):
@@ -190,7 +199,8 @@ class Store:
         with self.lock, self.db() as c:
             if c.execute("SELECT 1 FROM files WHERE path=?", (path,)).fetchone():
                 return 0
-            text = open(path, encoding="utf-8", errors="replace").read()
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
             if kind in ("marks", "samples"):
                 marks, notes = logparse.parse_marks(text)
                 for m in marks:
@@ -219,7 +229,8 @@ class Store:
                               [(n["drive"], n["mark"], n["saw"], n["text"], n["raw"]) for n in notes])
             else:
                 c.executemany(
-                    "INSERT OR IGNORE INTO alerts(drive,up,time,tier,src,mac,best,ch,dur,seen,label,ssid,"
+                    # REPLACE: an alert journaled again (it came back, or rose to HIGH) keeps its latest line
+                    "INSERT OR REPLACE INTO alerts(drive,up,time,tier,src,mac,best,ch,dur,seen,label,ssid,"
                     "lat,lon,mph,muted,ongoing,ended,why,tl,from_lat,from_lon,to_lat,to_lon,raw) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     [(a["drive"], a["up"], a["time"], a["tier"], a["src"], a["mac"], a["best"], a["ch"],
@@ -253,7 +264,7 @@ class Store:
         """Marks in drive order. Background samples (saw=AUTO) only when asked."""
         saw = self._saw(c)
         rows = []
-        q = "SELECT * FROM marks" + ("" if samples else " WHERE saw != 'AUTO'") + " ORDER BY drive, mark"
+        q = "SELECT * FROM marks" + ("" if samples else " WHERE saw IS NOT 'AUTO'") + " ORDER BY drive, mark"
         for r in c.execute(q):
             d = dict(r)
             d["saw_effective"] = saw.get((d["drive"], d["mark"]), d["saw"])
@@ -422,10 +433,13 @@ class Store:
         with self.db() as c:
             marks = self._marks(c)
             total = len(marks)
-            counts = {r["mac"]: (r["n"], r["n_nothing"]) for r in c.execute(
-                "SELECT l.mac, COUNT(DISTINCT l.mark_id) AS n, "
-                "SUM(CASE WHEN m.saw='NOTHING' THEN 1 ELSE 0 END) AS n_nothing "
-                "FROM lines l JOIN marks m ON m.id=l.mark_id WHERE l.kind IN ('WIFI','BLE') GROUP BY l.mac")}
+            # per transmitter: distinct snapshots it was heard in, and how many of
+            # those were "nothing there" marks (after corrections)
+            nothing_ids = {m["id"] for m in marks if m["saw_effective"] == "NOTHING"}
+            seen_in = {}
+            for r in c.execute("SELECT DISTINCT mac, mark_id FROM lines WHERE kind IN ('WIFI','BLE')"):
+                seen_in.setdefault(r["mac"], set()).add(r["mark_id"])
+            counts = {mac: (len(ids), len(ids & nothing_ids)) for mac, ids in seen_in.items()}
             out = []
             for m in reversed(marks):
                 if m["saw_effective"] != "POLICE":
@@ -463,7 +477,7 @@ class Store:
         with self.db() as c:
             return [dict(r) for r in c.execute(
                 "SELECT drive, MIN(time) AS first, COUNT(*) AS n, SUM(kind='m') AS marks, SUM(kind='a') AS alerts FROM ("
-                " SELECT drive, time, 'm' AS kind FROM marks WHERE saw != 'AUTO' UNION ALL SELECT drive, time, 'a' FROM alerts"
+                " SELECT drive, time, 'm' AS kind FROM marks WHERE saw IS NOT 'AUTO' UNION ALL SELECT drive, time, 'a' FROM alerts"
                 ") GROUP BY drive ORDER BY drive DESC")]
 
     def finder(self):
@@ -522,11 +536,16 @@ class Store:
             if not e["police"]:
                 continue
             # separate places (500 m apart) among the police sightings it was heard at
-            places = []
+            # (marks without a GPS fix count together as at most one extra place)
+            places, no_fix = [], False
             for mid in e["police"]:
                 m = snaps[mid]
-                if m["lat"] is None or all(dist_m(m["lat"], m["lon"], p[0], p[1]) > 500 for p in places):
-                    places.append((m["lat"] if m["lat"] is not None else 999, m["lon"] or 0))
+                if m["lat"] is None:
+                    no_fix = True
+                elif all(dist_m(m["lat"], m["lon"], p[0], p[1]) > 500 for p in places):
+                    places.append((m["lat"], m["lon"]))
+            if no_fix:
+                places.append(None)
             drives = {snaps[i]["drive"] for i in e["police"]}
             rate_p = len(e["police"]) / max(n_pol, 1)
             rate_b = (len(e["base"]) + 0.5) / (n_base + 1)
@@ -581,7 +600,7 @@ class Store:
                    "# was alerting). Lines under it are everything heard in the 30 s before it (WIFI/BLE) and what",
                    "# was alerting (ALERT / EARLIER). '# vendor:' comments are added by the server from the IEEE",
                    "# registry and the Bluetooth company list. 'A' lines are the alert journal.", ""]
-            for m in c.execute(f"SELECT * FROM marks WHERE drive IN ({q}) AND saw != 'AUTO' "
+            for m in c.execute(f"SELECT * FROM marks WHERE drive IN ({q}) AND saw IS NOT 'AUTO' "
                                "ORDER BY time, drive, mark", drives):
                 eff = saw.get((m["drive"], m["mark"]))
                 out.append(m["header"] + (f"   # corrected: saw={eff}" if eff and eff != m["saw"] else ""))

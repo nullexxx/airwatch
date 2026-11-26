@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AirWatch Review</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+ integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+ integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
 :root{--bg:#0f1216;--card:#171b21;--line:#262c35;--fg:#e3e7ec;--mute:#8b95a3;--acc:#5aa9ff;
 --hit:#3fb950;--miss:#f85149;--false:#d29922;--none:#6e7681;--high:#f85149;--low:#d29922;--echo:#5aa9ff}
@@ -68,7 +70,8 @@ document.addEventListener("click",e=>{const th=e.target.closest("th.s");if(!th)r
   const i=[...th.parentNode.children].indexOf(th),asc=!th.classList.contains("asc");
   th.parentNode.querySelectorAll("th").forEach(x=>x.classList.remove("asc","desc"));th.classList.add(asc?"asc":"desc");
   const key=r=>{const c=r.children[i];const v=c?(c.dataset.v??c.textContent.trim()):"";const n=parseFloat(v);return v!==""&&!isNaN(n)&&/^-?[\d.]/.test(v)?n:v.toLowerCase()};
-  [...tb.rows].filter(r=>!r.classList.contains("detail")).sort((a,b)=>{const x=key(a),y=key(b);return (x>y?1:x<y?-1:0)*(asc?1:-1)}).forEach(r=>tb.append(r))});
+  [...tb.rows].filter(r=>r.classList.contains("detail")).forEach(r=>r.remove());   // close expanded rows first
+  [...tb.rows].sort((a,b)=>{const x=key(a),y=key(b);return (x>y?1:x<y?-1:0)*(asc?1:-1)}).forEach(r=>tb.append(r))});
 // Signal over time: strongest signal each second (gaps = not heard). Taller = stronger.
 function spark(tl,w=140,h=28,axes=false){if(!tl||!tl.length)return"";const lo=-100,hi=-30,n=Math.max(tl.length-1,1),pad=axes?24:2;
   const X=i=>pad+(w-pad-2)*i/n,Y=v=>h-(axes?14:2)-(h-(axes?18:4))*(Math.min(hi,Math.max(lo,v))-lo)/(hi-lo);
@@ -161,8 +164,9 @@ async journal(){
    <td>${f.alerts}</td><td>${f.drives}</td><td>${f.best??""}</td><td>${when(f.last)}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Nothing yet.</td></tr>'}</tbody></table></div></div>
    <input type="search" id="jq" placeholder="Filter (name, MAC, tier…)"><p class="msg">Click a column to sort, or a row to see its signal over time.</p><div class="scroll"><table><thead><tr>
    <th class="s">Started</th><th class="s">Ended</th><th class="s">What</th><th class="s">Best signal</th><th>Signal over time</th><th class="s">Lasted</th><th class="s">Speed</th><th></th></tr></thead><tbody id="jt"></tbody></table></div>`;
-  const draw=()=>{const q=$("#jq").value.toLowerCase();$("#jt").innerHTML=j.alerts.filter(a=>!q||JSON.stringify(a).toLowerCase().includes(q)).map((a,i)=>
-   `<tr class="click" data-i="${j.alerts.indexOf(a)}"><td data-v="${esc(a.time||"")}">${when(a.time)}<div class="msg">drive ${a.drive}</div></td><td data-v="${esc(a.end||"")}">${clock(a.end)}</td>
+  const idx=j.alerts.map((a,i)=>[a,i,JSON.stringify(a).toLowerCase()]);   // index + search text, once
+  const draw=()=>{const q=$("#jq").value.toLowerCase();$("#jt").innerHTML=idx.filter(([a,i,t])=>!q||t.includes(q)).map(([a,i])=>
+   `<tr class="click" data-i="${i}"><td data-v="${esc(a.time||"")}">${when(a.time)}<div class="msg">drive ${a.drive}</div></td><td data-v="${esc(a.end||"")}">${clock(a.end)}</td>
     <td>${tier(a.tier)} ${esc(a.label||"")} ${a.ssid?`"${esc(a.ssid)}"`:""}
     <div class="mono msg">${esc(a.src)} ${esc(a.mac)} · ${esc(a.vendor)}${a.ongoing?" · cut short":""}${a.ended?" · ended: "+esc(a.ended):""}</div></td>
     <td>${a.best??""}</td><td>${spark(a.tl)||'<span class="msg">—</span>'}</td><td data-v="${a.dur??""}">${a.dur!=null?a.dur+" s":""}</td><td>${a.mph!=null?Math.round(a.mph)+" mph":""}</td><td>${mapLink(a.lat,a.lon)}</td></tr>`).join("")};
@@ -204,7 +208,7 @@ async "map-tab"(){
   const al=L.layerGroup(d.alerts.flatMap(a=>{pts.push([a.lat,a.lon]);const out=[L.circleMarker([a.lat,a.lon],{radius:5,color:tcol[a.tier]||"#999",weight:2,fillOpacity:.3})
     .bindPopup(`${esc(a.tier)} ${esc(a.label||"")}${a.ssid?` "${esc(a.ssid)}"`:""}<br>${esc(a.mac)} · best ${a.best}<br>drive ${a.drive}, ${when(a.time)}`)];
     // where it was first heard -> strongest -> last heard
-    if(a.from_lat!=null)out.push(L.polyline([[a.from_lat,a.from_lon],[a.lat,a.lon],[a.to_lat,a.to_lon]],{color:tcol[a.tier]||"#999",weight:2,opacity:.7,dashArray:"4 4"}));
+    if(a.from_lat!=null&&a.to_lat!=null)out.push(L.polyline([[a.from_lat,a.from_lon],[a.lat,a.lon],[a.to_lat,a.to_lon]],{color:tcol[a.tier]||"#999",weight:2,opacity:.7,dashArray:"4 4"}));
     return out})).addTo(map);
   const fl=L.layerGroup(d.fixed.map(f=>L.circle([f.lat,f.lon],{radius:Math.max(40,f.spread_m),color:"#a371f7",weight:2,fillOpacity:.1})
     .bindPopup(`Fixed: ${esc(f.label||"")} ${f.ssid?`"${esc(f.ssid)}"`:""}<br>${esc(f.mac)}<br>drives ${f.drives.join(", ")}`))).addTo(map);

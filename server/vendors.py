@@ -59,19 +59,26 @@ class Vendors:
                         mac[row[1].upper()[:width]] = row[2].strip()
         path = os.path.join(self.dir, "company_identifiers.yaml")
         if os.path.exists(path):
-            text = open(path, encoding="utf-8", errors="replace").read()
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
             for m in re.finditer(r"value:\s*0x([0-9A-Fa-f]+)\s*\n\s*name:\s*'?(.*?)'?\s*$", text, re.M):
                 cid[int(m.group(1), 16)] = m.group(2).replace("''", "'")
         with self.lock:
             self.mac, self.cid = mac, cid
         self.log(f"vendors: {len(mac):,} address blocks, {len(cid):,} Bluetooth company IDs")
 
+    def refresh_forever(self, every_s=86400):
+        """Check once a day; each list is re-downloaded when it is 30 days old."""
+        while True:
+            self.refresh()
+            time.sleep(every_s)
+
     def for_mac(self, mac):
         """Registered organisation, '(random)' for a randomised address, or ''."""
         h = (mac or "").replace(":", "").replace("-", "").upper()
         if len(h) < 6:
             return ""
-        if int(h[1], 16) & 2:
+        if h[1] in "2367ABEF":            # locally administered (randomised) address
             return "(random)"
         with self.lock:
             for n in (9, 7, 6):

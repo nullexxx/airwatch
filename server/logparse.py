@@ -49,6 +49,13 @@ def _latlon(at):
     return _float(a), _float(b)
 
 
+def _timeline(v):
+    """'-80,,-70' -> [-80, None, -70] (strongest signal per second; None = not heard)"""
+    if not v:
+        return None
+    return [_int(x) if x else None for x in v.split(",")]
+
+
 def _speed(d):
     if "mph" in d:
         return _float(d["mph"])
@@ -94,11 +101,12 @@ def parse_marks(text):
                 "ch": _int(d.get("ch")), "ssid": d.get("ssid"), "name": d.get("name"),
                 "cid": d.get("cid"), "svc": d.get("svc"), "wps": d.get("wps"), "vie": d.get("vie"),
                 "frames": d.get("frames"), "peer": (d.get("peer") or "").upper() or None,
-                "secs": _int(d.get("secs")), "first_ms": _ms(d.get("first")),
+                "secs": _int(d.get("secs")), "first_ms": _ms(d.get("first")), "ago_ms": _ms(d.get("ago")),
                 "addr": d.get("addr"), "adv": d.get("adv"),
                 "alerted": d.get("alerted"), "tier": d.get("tier"), "src": d.get("src"),
                 "label": d.get("label"), "why": d.get("why"),
                 "at_lat": lat, "at_lon": lon, "at_mph": _speed(d) if d.get("at") else None,
+                "tl": _timeline(d.get("tl")), "from": _latlon(d.get("from")), "to": _latlon(d.get("to")),
                 "raw": line,
             })
     return marks, notes
@@ -119,6 +127,7 @@ def parse_alerts(text):
             "seen": _int(d.get("seen")), "label": d.get("label"), "ssid": d.get("ssid"),
             "lat": lat, "lon": lon, "mph": _speed(d),
             "muted": d.get("muted") == "yes", "ongoing": d.get("ongoing"), "ended": d.get("ended"),
-            "why": d.get("why"), "raw": line,
+            "why": d.get("why"), "tl": _timeline(d.get("tl")),
+            "from": _latlon(d.get("from")), "to": _latlon(d.get("to")), "raw": line,
         })
     return out

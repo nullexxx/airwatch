@@ -55,7 +55,9 @@
  *
  * ALERT JOURNAL
  *   Every alert (anything that beeped or ticked) is saved as one line when
- *   it ends: when, what, strongest signal, how long, where. No button
+ *   it ends: when, what, strongest signal, how long, where. It also carries
+ *   tl= (its strongest signal in each second, up to 3 min) and from=/to=
+ *   (where it was first and last heard), which the log server charts. No button
  *   needed. It is capped at 256 KB (about 1,400 alerts); the oldest half is
  *   dropped when full, so it never crowds out marks. 'j' prints it; the web
  *   page shows it under Marks -> Alert journal. ERASE wipes it with the marks.
@@ -1005,7 +1007,19 @@ struct TrackedDevice {
   float       posLat;
   float       posLon;
   uint8_t     posMph;          // our speed there (stationary router vs. something pacing you)
+  bool        hasTrail;        // fromLat/Lon and toLat/Lon valid
+  float       fromLat;         // where its signal was first heard (with a GPS fix) ...
+  float       fromLon;
+  float       toLat;           // ... and last heard
+  float       toLon;
 };
+
+// Signal timeline: for each tracked device, its strongest signal in each
+// second of the encounter (index 0 = first heard), up to TIMELINE_SECONDS.
+// 0 = not heard that second. Written to the journal and marks as tl=, so the
+// review page can chart how the signal rose and fell.
+constexpr size_t TIMELINE_SECONDS = 180;
+int8_t* deviceTimeline = nullptr;       // DEVICE_CACHE_SIZE x TIMELINE_SECONDS (PSRAM when present)
 
 struct Note {
   uint16_t freqHz;   // used only when BUZZER_IS_PASSIVE
@@ -1353,6 +1367,15 @@ static void gpsTag(char* out, size_t cap, uint32_t now, uint32_t agoMs, bool pos
 }
 
 // Where (and how fast) we were for a tracked device. Only called with a fresh fix.
+static inline int8_t* timelineOf(const TrackedDevice& d);
+
+// First and last position it was heard from directly (with a fresh fix).
+static inline void noteDeviceTrail(TrackedDevice& d) {
+  if (!d.hasTrail) { d.hasTrail = true; d.fromLat = gps.lat; d.fromLon = gps.lon; }
+  d.toLat = gps.lat;
+  d.toLon = gps.lon;
+}
+
 static inline void setDevicePos(TrackedDevice& d) {
   d.hasPos = true;
   d.posLat = gps.lat;
@@ -2017,6 +2040,35 @@ static void journalAlert(const TrackedDevice& d, uint32_t now, bool ongoing = fa
 static void journalFlushOngoing();
 #endif
 
+static inline int8_t* timelineOf(const TrackedDevice& d) {
+  if (!deviceTimeline) return nullptr;
+  return deviceTimeline + static_cast<size_t>(&d - deviceCache) * TIMELINE_SECONDS;
+}
+
+static inline void timelineNote(const TrackedDevice& d, int8_t rssi, uint32_t now) {
+  int8_t* t = timelineOf(d);
+  if (!t || rssi >= 0) return;
+  const uint32_t i = (now - d.firstSeen) / 1000UL;
+  if (i >= TIMELINE_SECONDS) return;
+  if (t[i] == 0 || rssi > t[i]) t[i] = rssi;
+}
+
+// " tl=-80,-78,,-71 from=lat,lon to=lat,lon" (empty = not heard that second)
+static void printTimeline(Print& out, const TrackedDevice& d) {
+  if (const int8_t* t = timelineOf(d)) {
+    int last = -1;
+    for (int i = 0; i < static_cast<int>(TIMELINE_SECONDS); ++i) if (t[i]) last = i;
+    if (last >= 0) {
+      out.print(" tl=");
+      for (int i = 0; i <= last; ++i) {
+        if (i) out.print(',');
+        if (t[i]) out.print(static_cast<int>(t[i]));
+      }
+    }
+  }
+  if (d.hasTrail) out.printf(" from=%.5f,%.5f to=%.5f,%.5f", d.fromLat, d.fromLon, d.toLat, d.toLon);
+}
+
 static void startEncounter(TrackedDevice& d, const uint8_t mac[6], uint32_t now) {
 #if ENABLE_MARK_LOG
   // The slot is being reused (evicted from a full cache, or after a long
@@ -2027,6 +2079,7 @@ static void startEncounter(TrackedDevice& d, const uint8_t mac[6], uint32_t now)
   }
 #endif
   memset(&d, 0, sizeof(d));
+  if (int8_t* t = timelineOf(d)) memset(t, 0, TIMELINE_SECONDS);
   d.valid           = true;
   d.suppressed      = false;
   memcpy(d.mac, mac, 6);
@@ -2323,6 +2376,8 @@ static void noteSighting(const Sighting& s, uint32_t now) {
     } else if (!d->hasPos && gpsFixFresh(now)) {
       setDevicePos(*d);
     }
+    timelineNote(*d, s.rssi, now);
+    if (gpsFixFresh(now)) noteDeviceTrail(*d);
   } else if (!d->hasRssi) {
     d->src     = s.src;
     d->channel = s.channel;
@@ -2954,6 +3009,7 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
     if (d.ssid[0]) f.printf(" ssid=\"%s\"", d.ssid);
     if (d.bestRssi > -127) f.printf(" best=%d", d.bestRssi);
     if (d.hasPos) f.printf(" at=%.5f,%.5f mph=%u", d.posLat, d.posLon, static_cast<unsigned>(d.posMph));
+    printTimeline(f, d);
     f.printf(" why=%s\n", why);
   }
 
@@ -3045,6 +3101,7 @@ static void journalAlert(const TrackedDevice& d, uint32_t now, bool ongoing, con
   if (audioMuted) w.print(" muted=yes");
   if (ongoing)    w.print(" ongoing=yes");      // still in range (reboot, or its slot was needed)
   if (ended)      w.printf(" ended=%s", ended); // e.g. fleet: silenced as Fire/EMS mid-alert
+  printTimeline(w, d);
   w.printf(" why=%s\n", why);
   w.close();
   markLogRefreshUsage();
@@ -5751,6 +5808,9 @@ void setup() {
   }
   recentIndex = static_cast<RecentIndex*>(calloc(recentCap, sizeof(RecentIndex)));
   recentOrder = static_cast<uint16_t*>(calloc(recentCap, sizeof(uint16_t)));
+  // Signal timelines (optional: without them alerts are logged as before)
+  if (psramFound()) deviceTimeline = static_cast<int8_t*>(ps_calloc(DEVICE_CACHE_SIZE, TIMELINE_SECONDS));
+  if (!deviceTimeline) deviceTimeline = static_cast<int8_t*>(calloc(DEVICE_CACHE_SIZE, TIMELINE_SECONDS));
   if (!recentTable || !recentIndex || !recentOrder) {
     fatalInitError("Recent table allocation failed");
   }

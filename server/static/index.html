@@ -30,6 +30,8 @@ input[type=search],select{background:var(--card);color:var(--fg);border:1px soli
 #map{height:72vh;border-radius:10px;border:1px solid var(--line)}
 .legend span{margin-right:12px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
 .scroll{overflow-x:auto}a{color:var(--acc)}
+th.s{cursor:pointer;user-select:none}th.s:after{content:" ↕";opacity:.35}th.s.asc:after{content:" ↑";opacity:1}th.s.desc:after{content:" ↓";opacity:1}
+svg.tl{display:block}svg.tl .ax{stroke:var(--line)}svg.tl text{fill:var(--mute);font-size:10px}
 </style>
 </head>
 <body>
@@ -59,6 +61,21 @@ const kindTag=k=>`<span class="tag k-${k}">${KIND[k]||k}</span>`;
 const tier=t=>`<span class="t-${esc(t)}">${esc(t==="ECHO"?"MINOR":t==="LOW"?"MAYBE":t==="HIGH"?"POLICE":t)}</span>`;
 const mapLink=(la,lo)=>la!=null?`<a target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=18/${la}/${lo}">map</a>`:"";
 const loaded={};
+const clock=t=>t?new Date(t).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"";
+// Click a column header to sort (numbers numerically, everything else as text).
+document.addEventListener("click",e=>{const th=e.target.closest("th.s");if(!th)return;const tb=th.closest("table").tBodies[0];
+  const i=[...th.parentNode.children].indexOf(th),asc=!th.classList.contains("asc");
+  th.parentNode.querySelectorAll("th").forEach(x=>x.classList.remove("asc","desc"));th.classList.add(asc?"asc":"desc");
+  const key=r=>{const c=r.children[i];const v=c?(c.dataset.v??c.textContent.trim()):"";const n=parseFloat(v);return v!==""&&!isNaN(n)&&/^-?[\d.]/.test(v)?n:v.toLowerCase()};
+  [...tb.rows].filter(r=>!r.classList.contains("detail")).sort((a,b)=>{const x=key(a),y=key(b);return (x>y?1:x<y?-1:0)*(asc?1:-1)}).forEach(r=>tb.append(r))});
+// Signal over time: strongest signal each second (gaps = not heard). Taller = stronger.
+function spark(tl,w=140,h=28,axes=false){if(!tl||!tl.length)return"";const lo=-100,hi=-30,n=Math.max(tl.length-1,1),pad=axes?24:2;
+  const X=i=>pad+(w-pad-2)*i/n,Y=v=>h-(axes?14:2)-(h-(axes?18:4))*(Math.min(hi,Math.max(lo,v))-lo)/(hi-lo);
+  let d="",pen=false;tl.forEach((v,i)=>{if(v==null){pen=false;return}d+=(pen?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1);pen=true});
+  const dots=tl.map((v,i)=>v==null?"":`<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="${axes?2:1.2}" fill="var(--acc)"/>`).join("");
+  const ax=axes?`<line class="ax" x1="${pad}" x2="${w}" y1="${Y(-60)}" y2="${Y(-60)}"/><line class="ax" x1="${pad}" x2="${w}" y1="${Y(-90)}" y2="${Y(-90)}"/>
+   <text x="0" y="${Y(-60)+3}">-60</text><text x="0" y="${Y(-90)+3}">-90</text><text x="${pad}" y="${h-2}">0 s</text><text x="${w-30}" y="${h-2}">${tl.length-1} s</text>`:"";
+  return `<svg class="tl" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${ax}<path d="${d}" fill="none" stroke="var(--acc)" stroke-width="1.5"/>${dots}</svg>`}
 
 function show(id){
   document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===id));
@@ -117,11 +134,18 @@ async journal(){
    <thead><tr><th>Device</th><th>Vendor</th><th>Alerts</th><th>Drives</th><th>Best</th><th>Last</th></tr></thead><tbody>
    ${j.frequent.map(f=>`<tr><td>${esc(f.label||"")} ${f.ssid?`"${esc(f.ssid)}"`:""}<div class="mono msg">${esc(f.mac)}</div></td><td>${esc(f.vendor)}</td>
    <td>${f.alerts}</td><td>${f.drives}</td><td>${f.best??""}</td><td>${when(f.last)}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Nothing yet.</td></tr>'}</tbody></table></div></div>
-   <input type="search" id="jq" placeholder="Filter (name, MAC, tier…)"><div class="scroll"><table><thead><tr><th>When</th><th>What</th><th>Signal</th><th>Lasted</th><th>Speed</th><th></th></tr></thead><tbody id="jt"></tbody></table></div>`;
-  const draw=()=>{const q=$("#jq").value.toLowerCase();$("#jt").innerHTML=j.alerts.filter(a=>!q||JSON.stringify(a).toLowerCase().includes(q)).map(a=>
-   `<tr><td>${when(a.time)}<div class="msg">drive ${a.drive}</div></td><td>${tier(a.tier)} ${esc(a.label||"")} ${a.ssid?`"${esc(a.ssid)}"`:""}
+   <input type="search" id="jq" placeholder="Filter (name, MAC, tier…)"><p class="msg">Click a column to sort, or a row to see its signal over time.</p><div class="scroll"><table><thead><tr>
+   <th class="s">Started</th><th class="s">Ended</th><th class="s">What</th><th class="s">Best signal</th><th>Signal over time</th><th class="s">Lasted</th><th class="s">Speed</th><th></th></tr></thead><tbody id="jt"></tbody></table></div>`;
+  const draw=()=>{const q=$("#jq").value.toLowerCase();$("#jt").innerHTML=j.alerts.filter(a=>!q||JSON.stringify(a).toLowerCase().includes(q)).map((a,i)=>
+   `<tr class="click" data-i="${j.alerts.indexOf(a)}"><td data-v="${esc(a.time||"")}">${when(a.time)}<div class="msg">drive ${a.drive}</div></td><td data-v="${esc(a.end||"")}">${clock(a.end)}</td>
+    <td>${tier(a.tier)} ${esc(a.label||"")} ${a.ssid?`"${esc(a.ssid)}"`:""}
     <div class="mono msg">${esc(a.src)} ${esc(a.mac)} · ${esc(a.vendor)}${a.ongoing?" · cut short":""}${a.ended?" · ended: "+esc(a.ended):""}</div></td>
-    <td>${a.best??""}</td><td>${a.dur!=null?a.dur+" s":""}</td><td>${a.mph!=null?Math.round(a.mph)+" mph":""}</td><td>${mapLink(a.lat,a.lon)}</td></tr>`).join("")};
+    <td>${a.best??""}</td><td>${spark(a.tl)||'<span class="msg">—</span>'}</td><td data-v="${a.dur??""}">${a.dur!=null?a.dur+" s":""}</td><td>${a.mph!=null?Math.round(a.mph)+" mph":""}</td><td>${mapLink(a.lat,a.lon)}</td></tr>`).join("")};
+  $("#jt").onclick=e=>{const tr=e.target.closest("tr.click");if(!tr||e.target.tagName==="A")return;const nx=tr.nextElementSibling;
+    if(nx&&nx.classList.contains("detail")){nx.remove();return}const a=j.alerts[+tr.dataset.i];const d=document.createElement("tr");d.className="detail";
+    d.innerHTML=`<td colspan="8">${a.tl?spark(a.tl,620,150,true)+`<p class="msg">Strongest signal in each second from ${clock(a.time)}. A single rise and fall = something you drove past;
+     a long flat line = something moving with you; a short sharp spike = something passing the other way.</p>`:'<p class="msg">No signal timeline (logged before the board recorded them).</p>'}
+     ${a.from_lat!=null?`<p class="msg">First heard ${mapLink(a.from_lat,a.from_lon)}, strongest ${mapLink(a.lat,a.lon)}, last heard ${mapLink(a.to_lat,a.to_lon)}.</p>`:""}</td>`;tr.after(d)};
   $("#jq").oninput=draw;draw();
 },
 async repeat(){
@@ -152,14 +176,17 @@ async "map-tab"(){
   const pts=[];
   const ml=L.layerGroup(d.marks.map(m=>{pts.push([m.lat,m.lon]);return L.circleMarker([m.lat,m.lon],{radius:8,color:"#000",weight:1,fillColor:col[m.kind],fillOpacity:.95})
     .bindPopup(`<b>Drive ${m.drive} · mark ${m.mark}</b><br>${KIND[m.kind]}<br>${when(m.time)}${m.lead?"<br>"+esc(m.lead):""}`)})).addTo(map);
-  const al=L.layerGroup(d.alerts.map(a=>{pts.push([a.lat,a.lon]);return L.circleMarker([a.lat,a.lon],{radius:5,color:tcol[a.tier]||"#999",weight:2,fillOpacity:.3})
-    .bindPopup(`${esc(a.tier)} ${esc(a.label||"")}${a.ssid?` "${esc(a.ssid)}"`:""}<br>${esc(a.mac)} · best ${a.best}<br>drive ${a.drive}, ${when(a.time)}`)})).addTo(map);
+  const al=L.layerGroup(d.alerts.flatMap(a=>{pts.push([a.lat,a.lon]);const out=[L.circleMarker([a.lat,a.lon],{radius:5,color:tcol[a.tier]||"#999",weight:2,fillOpacity:.3})
+    .bindPopup(`${esc(a.tier)} ${esc(a.label||"")}${a.ssid?` "${esc(a.ssid)}"`:""}<br>${esc(a.mac)} · best ${a.best}<br>drive ${a.drive}, ${when(a.time)}`)];
+    // where it was first heard -> strongest -> last heard
+    if(a.from_lat!=null)out.push(L.polyline([[a.from_lat,a.from_lon],[a.lat,a.lon],[a.to_lat,a.to_lon]],{color:tcol[a.tier]||"#999",weight:2,opacity:.7,dashArray:"4 4"}));
+    return out})).addTo(map);
   const fl=L.layerGroup(d.fixed.map(f=>L.circle([f.lat,f.lon],{radius:Math.max(40,f.spread_m),color:"#a371f7",weight:2,fillOpacity:.1})
     .bindPopup(`Fixed: ${esc(f.label||"")} ${f.ssid?`"${esc(f.ssid)}"`:""}<br>${esc(f.mac)}<br>drives ${f.drives.join(", ")}`))).addTo(map);
   L.control.layers(null,{"Marks":ml,"Alerts (peak signal)":al,"Fixed routers":fl}).addTo(map);
   if(pts.length)map.fitBounds(pts,{padding:[30,30],maxZoom:15});else map.setView([37.6,-77.5],11);
   $("#legend").innerHTML=Object.entries({hit:"confirmed",miss:"missed",false:"false alarm",none:"nothing there"}).map(([k,l])=>`<span><i class="dot" style="background:${col[k]}"></i>${l}</span>`).join("")+
-   `<span><i class="dot" style="border:2px solid #d29922"></i>alert, where strongest</span><span><i class="dot" style="border:2px solid #a371f7"></i>fixed router</span>`;
+   `<span><i class="dot" style="border:2px solid #d29922"></i>alert, where strongest (dashed: first → last heard)</span><span><i class="dot" style="border:2px solid #a371f7"></i>fixed router</span>`;
 },
 async export(){
   const ds=await get("api/drives");
@@ -175,12 +202,15 @@ async export(){
 
 function markDetail(m){
   const al=m.lines.filter(l=>l.kind==="ALERT"||l.kind==="EARLIER"),hd=m.lines.filter(l=>l.kind==="WIFI"||l.kind==="BLE");
+  const rel=(at,ms)=>at?`<td data-v="${esc(at)}">${clock(at)}</td>`:`<td data-v="${-(ms??0)}">${ms!=null?Math.round(ms/1000)+" s before":""}</td>`;
   return `${al.length?`<b>Alerting</b><table>${al.map(l=>`<tr><td>${esc(l.kind)}</td><td>${tier(l.tier)} ${esc(l.label||"")} ${l.ssid?`"${esc(l.ssid)}"`:""}</td>
-   <td class="mono">${esc(l.mac)}</td><td>${esc(l.vendor)}</td><td>best ${l.best??l.rssi}</td><td>${mapLink(l.at_lat,l.at_lon)}</td></tr>`).join("")}</table>`:""}
-   <b>Heard in the 30 s before (${hd.length})</b> <span class="msg">"elsewhere" = how many other marks it was heard in</span>
-   <div class="scroll"><table><thead><tr><th>Radio</th><th>Address</th><th>Vendor</th><th>Name</th><th>Signal</th><th>Elsewhere</th><th>Talking to</th></tr></thead><tbody>
+   <td class="mono">${esc(l.mac)}</td><td>${esc(l.vendor)}</td><td>best ${l.best??l.rssi}</td><td>${spark(l.tl,260,70,true)}</td><td>${mapLink(l.at_lat,l.at_lon)}</td></tr>`).join("")}</table>`:""}
+   <b>Heard in the 30 s before (${hd.length})</b> <span class="msg">Click a column to sort. "Elsewhere" = how many other marks it was heard in.</span>
+   <div class="scroll"><table><thead><tr><th class="s">Radio</th><th class="s">Address</th><th class="s">Vendor</th><th class="s">Name</th><th class="s">Signal</th>
+   <th class="s">First heard</th><th class="s">Last heard</th><th class="s">Seconds heard</th><th class="s">Elsewhere</th><th class="s">Talking to</th></tr></thead><tbody>
    ${hd.map(l=>`<tr><td>${esc(l.kind)}</td><td class="mono">${esc(l.mac)}${l.alerted?` <span class="t-LOW">${esc(l.alerted)}</span>`:""}</td><td>${esc(l.vendor)}</td>
-    <td>${esc(l.ssid||l.name||"")}${l.wps?`<div class="msg">WPS: ${esc(l.wps)}</div>`:""}</td><td>${l.rssi??""}</td><td>${l.elsewhere}</td><td class="mono">${esc(l.peer||"")}</td></tr>`).join("")}</tbody></table></div>`;
+    <td>${esc(l.ssid||l.name||"")}${l.wps?`<div class="msg">WPS: ${esc(l.wps)}</div>`:""}</td><td>${l.rssi??""}</td>${rel(l.first_at,l.first_ms)}${rel(l.last_at,l.ago_ms)}
+    <td>${l.secs??""}</td><td>${l.elsewhere}</td><td class="mono">${esc(l.peer||"")}</td></tr>`).join("")}</tbody></table></div>`;
 }
 show(TABS.some(t=>t[0]===location.hash.slice(1))?location.hash.slice(1):"overview");
 </script>

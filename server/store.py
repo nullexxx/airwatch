@@ -3,7 +3,9 @@
 The raw uploads under <data>/YYYY-MM-DD/ stay the source of truth. Each one is
 read into airwatch.db once; delete the database and it is rebuilt from them.
 """
+import datetime
 import glob
+import json
 import math
 import os
 import re
@@ -13,7 +15,7 @@ import time
 
 import logparse
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, kind TEXT, size INTEGER, ingested REAL);
@@ -25,14 +27,16 @@ CREATE TABLE IF NOT EXISTS lines(
   id INTEGER PRIMARY KEY, mark_id INT, kind TEXT, mac TEXT, rssi INT, best INT, ch INT,
   ssid TEXT, name TEXT, cid TEXT, svc TEXT, wps TEXT, vie TEXT, frames TEXT, peer TEXT,
   secs INT, first_ms INT, addr TEXT, adv TEXT, alerted TEXT, tier TEXT, src TEXT, label TEXT,
-  why TEXT, at_lat REAL, at_lon REAL, at_mph REAL, raw TEXT);
+  why TEXT, at_lat REAL, at_lon REAL, at_mph REAL, ago_ms INT, tl TEXT,
+  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, raw TEXT);
 CREATE INDEX IF NOT EXISTS lines_mac ON lines(mac);
 CREATE INDEX IF NOT EXISTS lines_mark ON lines(mark_id);
 CREATE TABLE IF NOT EXISTS notes(drive INT, mark INT, saw TEXT, text TEXT, raw TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS alerts(
   id INTEGER PRIMARY KEY, drive INT, up INT, time TEXT, tier TEXT, src TEXT, mac TEXT,
   best INT, ch INT, dur INT, seen INT, label TEXT, ssid TEXT, lat REAL, lon REAL, mph REAL,
-  muted INT, ongoing TEXT, ended TEXT, why TEXT, raw TEXT, UNIQUE(drive, up, mac, tier));
+  muted INT, ongoing TEXT, ended TEXT, why TEXT, tl TEXT,
+  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, raw TEXT, UNIQUE(drive, up, mac, tier));
 CREATE INDEX IF NOT EXISTS alerts_mac ON alerts(mac);
 """
 
@@ -56,6 +60,30 @@ HOME_VENDOR = ("ARCADYAN", "SERCOMM", "VANTIVA", "TECHNICOLOR", "COMMSCOPE", "AR
                "FORTINET", "EXTREME NETWORKS")
 
 
+def iso_minus(iso, ms):
+    """'2026-11-25T18:29:18Z' minus ms -> ISO string (None if unknown)"""
+    if not iso or ms is None:
+        return None
+    try:
+        t = datetime.datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ") - datetime.timedelta(milliseconds=ms)
+        return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def iso_plus_s(iso, s):
+    if not iso or s is None:
+        return None
+    return iso_minus(iso, -1000 * s)
+
+
+def _decode(row):
+    """tl JSON -> list"""
+    if row.get("tl"):
+        row["tl"] = json.loads(row["tl"])
+    return row
+
+
 def is_random(mac):
     h = (mac or "").replace(":", "")
     return len(h) >= 2 and bool(int(h[1], 16) & 2)
@@ -76,15 +104,18 @@ class Store:
         self.vendors = vendors
         self.log = log
         self.lock = threading.Lock()
-        with self.db() as c:
-            v = None
+        v = None
+        if os.path.exists(self.path):
+            c = sqlite3.connect(self.path)
             try:
                 v = c.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
             except sqlite3.OperationalError:
                 pass
-            if v and int(v[0]) != SCHEMA_VERSION:   # older layout: rebuild from the raw files
+            finally:
                 c.close()
+            if v and int(v[0]) != SCHEMA_VERSION:   # older layout: rebuild from the raw files
                 os.remove(self.path)
+                log(f"index: format changed (v{v[0]} -> v{SCHEMA_VERSION}), rebuilding from the uploads")
         with self.db() as c:
             c.executescript(SCHEMA)
             c.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (str(SCHEMA_VERSION),))
@@ -125,21 +156,26 @@ class Store:
                     mid = cur.lastrowid
                     c.executemany(
                         "INSERT INTO lines(mark_id,kind,mac,rssi,best,ch,ssid,name,cid,svc,wps,vie,frames,peer,"
-                        "secs,first_ms,addr,adv,alerted,tier,src,label,why,at_lat,at_lon,at_mph,raw) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "secs,first_ms,addr,adv,alerted,tier,src,label,why,at_lat,at_lon,at_mph,ago_ms,tl,"
+                        "from_lat,from_lon,to_lat,to_lon,raw) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         [(mid, l["kind"], l["mac"], l["rssi"], l["best"], l["ch"], l["ssid"], l["name"],
                           l["cid"], l["svc"], l["wps"], l["vie"], l["frames"], l["peer"], l["secs"],
                           l["first_ms"], l["addr"], l["adv"], l["alerted"], l["tier"], l["src"], l["label"],
-                          l["why"], l["at_lat"], l["at_lon"], l["at_mph"], l["raw"]) for l in m["lines"]])
+                          l["why"], l["at_lat"], l["at_lon"], l["at_mph"], l["ago_ms"],
+                          json.dumps(l["tl"]) if l["tl"] else None, *l["from"], *l["to"], l["raw"])
+                         for l in m["lines"]])
                 c.executemany("INSERT OR IGNORE INTO notes(drive,mark,saw,text,raw) VALUES(?,?,?,?,?)",
                               [(n["drive"], n["mark"], n["saw"], n["text"], n["raw"]) for n in notes])
             else:
                 c.executemany(
                     "INSERT OR IGNORE INTO alerts(drive,up,time,tier,src,mac,best,ch,dur,seen,label,ssid,"
-                    "lat,lon,mph,muted,ongoing,ended,why,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "lat,lon,mph,muted,ongoing,ended,why,tl,from_lat,from_lon,to_lat,to_lon,raw) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     [(a["drive"], a["up"], a["time"], a["tier"], a["src"], a["mac"], a["best"], a["ch"],
                       a["dur"], a["seen"], a["label"], a["ssid"], a["lat"], a["lon"], a["mph"],
-                      int(a["muted"]), a["ongoing"], a["ended"], a["why"], a["raw"])
+                      int(a["muted"]), a["ongoing"], a["ended"], a["why"],
+                      json.dumps(a["tl"]) if a["tl"] else None, *a["from"], *a["to"], a["raw"])
                      for a in logparse.parse_alerts(text)])
             c.execute("INSERT INTO files VALUES(?,?,?,?)", (path, kind, os.path.getsize(path), time.time()))
         return 1
@@ -219,18 +255,24 @@ class Store:
             lines = []
             for l in c.execute("SELECT * FROM lines WHERE mark_id=? ORDER BY kind IN ('ALERT','EARLIER') DESC, "
                                "COALESCE(best, rssi) DESC", (mark_id,)):
-                l = dict(l)
+                l = _decode(dict(l))
                 l["vendor"] = self.vendor(l["mac"], l["cid"])
                 l["elsewhere"] = seen_elsewhere.get(l["mac"], 0)
+                # clock times from the mark's GPS time: first heard / last heard
+                l["first_at"] = iso_minus(m["time"], l["first_ms"])
+                l["last_at"] = iso_minus(m["time"], l["ago_ms"])
+                l.pop("raw", None)
                 lines.append(l)
             m["lines"] = lines
             return m
 
     def journal(self):
         with self.db() as c:
-            rows = [dict(r) for r in c.execute("SELECT * FROM alerts ORDER BY time DESC, drive DESC, up DESC")]
+            rows = [_decode(dict(r)) for r in c.execute("SELECT * FROM alerts ORDER BY time DESC, drive DESC, up DESC")]
             for r in rows:
                 r["vendor"] = self.vendor(r["mac"])
+                r["end"] = iso_plus_s(r["time"], r["dur"])
+                r.pop("raw", None)
             freq = [dict(r) for r in c.execute(
                 "SELECT mac, MAX(label) AS label, MAX(ssid) AS ssid, COUNT(*) AS alerts, COUNT(DISTINCT drive) AS drives, "
                 "MAX(time) AS last, MAX(best) AS best FROM alerts GROUP BY mac HAVING drives > 1 "
@@ -360,7 +402,8 @@ class Store:
                       "lat": m["lat"], "lon": m["lon"], "lead": m["lead"]}
                      for m in self._marks(c) if m["lat"] is not None]
             alerts = [dict(r) for r in c.execute(
-                "SELECT drive, time, tier, mac, label, ssid, best, lat, lon FROM alerts WHERE lat IS NOT NULL")]
+                "SELECT drive, time, tier, mac, label, ssid, best, lat, lon, from_lat, from_lon, to_lat, to_lon "
+                "FROM alerts WHERE lat IS NOT NULL")]
         return {"marks": marks, "alerts": alerts, "fixed": [f for f in self.fixed() if f["stationary"]]}
 
     def drives(self):

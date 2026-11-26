@@ -318,9 +318,9 @@ the receiver on TCP port 8077, or run the receiver on the board's network.
 | Tab | Shows |
 |---|---|
 | Overview | totals: drives, marks, confirmed, missed, false alarms |
-| Marks | every mark, newest first; click one to see everything heard, with vendor names and how often each device turns up elsewhere |
+| Marks | every mark, newest first; click one to see everything heard, with vendor names, when each device was first and last heard, and how often it turns up elsewhere (click any column to sort) |
 | Police sightings | for each mark where you saw police, what was heard there, ranked: rare elsewhere, strong, police-type vendor, and not home or store Wi-Fi |
-| Alert journal | every alert, plus the ones that keep coming back |
+| Alert journal | every alert with start and end time, plus the ones that keep coming back; click one for its signal over time and where it was first, most strongly and last heard |
 | Repeat offenders | devices alerting in several marks; transmitters heard where you saw police in different places |
 | Fixed routers | things that alert at the same spot on different drives (a building, not a vehicle), for you to review |
 | Map | marks, alert positions and fixed routers on OpenStreetMap |
@@ -372,6 +372,10 @@ How to read a mark:
 - `ongoing=yes` means the alert was still in range when it was written (reboot,
   or a full device table).
 - `ended=fleet` means it was silenced mid-alert as a Fire/EMS router.
+- `tl=` is its strongest signal in each second of the encounter, up to 3 minutes
+  (empty = not heard that second). `from=` and `to=` are where it was first and
+  last heard. The review page charts these: a single rise and fall is something
+  you drove past, a long flat line is something moving with you.
 
 ## Serial commands
 

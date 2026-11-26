@@ -688,6 +688,13 @@ const SSIDTarget ssidTargets[] = {
   {"VSP",         "State Police",      CAT_LOW_CONF,  MATCH_PREFIX},
   {"SHERIFF",     "Sheriff Dept",      CAT_LOW_CONF,  MATCH_SUBSTRING},
   {"STATE_POL",   "State Police",      CAT_LOW_CONF,  MATCH_PREFIX},
+  // Confirmed on a marked Henrico PD truck (drive 73, Nov 2026): its
+  // Cradlepoint broadcast "GRTC-MT Wifi" and "GRTC-Radio", and its Motorola
+  // radio looked for "GRTC-Radio". The names also catch the second network,
+  // whose derived address the Cradlepoint prefix does not. LOW until more
+  // sightings show these are always police.
+  {"GRTC-MT",     "GRTC/Henrico unit", CAT_LOW_CONF,  MATCH_PREFIX},
+  {"GRTC-RADIO",  "GRTC/Henrico unit", CAT_LOW_CONF,  MATCH_EXACT},
   // [new] Cradlepoint factory SSIDs are "<model>-<3 hex digits>"
   {"IBR6",        "Cradlepoint IBR",   CAT_LOW_CONF,  MATCH_PREFIX},
   {"IBR9",        "Cradlepoint IBR",   CAT_LOW_CONF,  MATCH_PREFIX},

@@ -124,6 +124,9 @@
  *   itself until it has not heard your home network for HOME_RELEASE_MS
  *   (5 min), i.e. you drove away and came back. A power cycle also re-arms
  *   it.
+ *   With UPLOAD_URL / UPLOAD_TOKEN in secrets.h it first sends the mark log
+ *   and alert journal to the receiver in server/ and clears them once the
+ *   receiver confirms an identical copy (README: Sending logs home).
  *   HOME_WIFI_BSSID may list several access points (a mesh), separated by
  *   commas; it joins whichever of them is strongest.
  *   The phone must be able to reach the board: on a UniFi "IoT" network
@@ -264,6 +267,18 @@
 #if ENABLE_MARK_LOG
   #include <FS.h>
   #include <LittleFS.h>
+#endif
+// Upload on arrival: with UPLOAD_URL in secrets.h, the board sends its mark
+// log and alert journal to the receiver in server/ each time it joins the
+// home Wi-Fi, and deletes them once the receiver confirms a matching copy.
+#if HOME_SYNC && ENABLE_MARK_LOG && defined(UPLOAD_URL)
+  #define AUTO_UPLOAD 1
+  #include <HTTPClient.h>
+  #ifndef UPLOAD_TOKEN
+    #define UPLOAD_TOKEN ""
+  #endif
+#else
+  #define AUTO_UPLOAD 0
 #endif
 
 // ============================================================
@@ -5295,6 +5310,111 @@ static void webPrintEvents(uint32_t now) {
   }
 }
 
+#if AUTO_UPLOAD
+// ------------------------------------------------------------
+// Upload on arrival
+// ------------------------------------------------------------
+// Each log is first renamed to a ".pending" file, so marks saved while it is
+// being sent go to a fresh log. The receiver answers "OK <bytes> <crc32>";
+// only an exact match deletes the pending file. Anything not confirmed stays
+// and is sent first on the next arrival.
+#define MARKS_PENDING_PATH      "/marks.pending"
+#define ALERTS_PENDING_OLD_PATH "/alerts.pending.1"
+#define ALERTS_PENDING_PATH     "/alerts.pending"
+
+static uint32_t crc32Update(uint32_t crc, const uint8_t* p, size_t n) {   // zlib-compatible
+  crc = ~crc;
+  while (n--) {
+    crc ^= *p++;
+    for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320UL & (0U - (crc & 1U)));
+  }
+  return ~crc;
+}
+
+static bool fileCrc(const char* path, size_t& size, uint32_t& crc) {
+  File f = LittleFS.open(path, FILE_READ);
+  if (!f) return false;
+  static uint8_t buf[1024];
+  size = 0;
+  crc  = 0;
+  while (f.available()) {
+    const size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) break;
+    crc = crc32Update(crc, buf, n);
+    size += n;
+  }
+  f.close();
+  return true;
+}
+
+// Sends one file; true only when the receiver confirmed an identical copy.
+static bool uploadFile(const char* path, const char* kind) {
+  size_t size = 0;
+  uint32_t crc = 0;
+  if (!fileCrc(path, size, crc)) return false;
+  if (size == 0) return true;                       // nothing to keep
+
+  File f = LittleFS.open(path, FILE_READ);
+  if (!f) return false;
+  char url[200];
+  snprintf(url, sizeof(url), "%s?kind=%s&drive=%lu&mac=%s", UPLOAD_URL, kind,
+           static_cast<unsigned long>(bootCount), WiFi.macAddress().c_str());
+  HTTPClient http;
+  http.setTimeout(20000);
+  if (!http.begin(url)) { f.close(); return false; }
+  http.addHeader("Content-Type", "text/plain; charset=utf-8");
+  http.addHeader("X-AirWatch-Token", UPLOAD_TOKEN);
+  const int code = http.sendRequest("POST", &f, size);
+  const String reply = (code > 0) ? http.getString() : String();
+  http.end();
+  f.close();
+
+  unsigned long gotBytes = 0, gotCrc = 0;
+  const bool ok = (code == 200) &&
+                  sscanf(reply.c_str(), "OK %lu %lx", &gotBytes, &gotCrc) == 2 &&
+                  gotBytes == size && static_cast<uint32_t>(gotCrc) == crc;
+  if (ok) {
+    Console.printf("[UPLOAD] %s: %u bytes confirmed\n", kind, static_cast<unsigned>(size));
+  } else {
+    Console.printf("[UPLOAD] %s: not confirmed (HTTP %d, reply \"%s\") - kept on the board\n",
+                   kind, code, reply.substring(0, 60).c_str());
+  }
+  return ok;
+}
+
+// Moves a log aside (unless an earlier pending copy is still waiting), sends
+// it, and deletes it once confirmed.
+static bool uploadLog(const char* livePath, const char* pendingPath, const char* kind) {
+  if (!LittleFS.exists(pendingPath)) {
+    if (!LittleFS.exists(livePath)) return true;
+    if (!LittleFS.rename(livePath, pendingPath)) return false;
+  }
+  if (!uploadFile(pendingPath, kind)) return false;
+  LittleFS.remove(pendingPath);
+  return true;
+}
+
+static void uploadOnArrival(uint32_t now) {
+  if (!markLogReady) return;
+  audioStop();
+  Console.printf("[UPLOAD] sending logs to %s\n", UPLOAD_URL);
+  showNotice("UPLOADING", "marks + alert journal", now);
+  refreshDisplay(true);
+  bool ok = true;
+  // Twice: a copy left from a failed earlier attempt goes first, then
+  // whatever was saved since.
+  for (int pass = 0; pass < 2 && ok; ++pass) {
+    ok = uploadLog(MARK_LOG_PATH, MARKS_PENDING_PATH, "marks") &&
+         uploadLog(JOURNAL_OLD_PATH, ALERTS_PENDING_OLD_PATH, "alerts") &&
+         uploadLog(JOURNAL_PATH, ALERTS_PENDING_PATH, "alerts");
+  }
+  markLogRefreshUsage();
+  showNotice(ok ? "UPLOADED" : "UPLOAD FAIL", ok ? "logs cleared" : "kept, retry next time", millis());
+  if (!ok) audioPlay(JINGLE_MARK_NOTHING, sizeof(JINGLE_MARK_NOTHING) / sizeof(Note),
+                     AUDIO_PRIO_BOOT, millis());   // two long beeps: not sent, still on the board
+}
+#endif  // AUTO_UPLOAD
+
 // Runs every loop() while a web mode is up.
 static void maintTick(uint32_t now) {
   if (!maintActive) return;
@@ -5327,6 +5447,10 @@ static void maintTick(uint32_t now) {
         Console.println(F("[HOME] the phone must be on a network that can reach this address "
                           "(same network, no client isolation / IoT firewall)"));
         lastRenderedState = DisplaySnapshot{};
+#if AUTO_UPLOAD
+        uploadOnArrival(now);
+        maintLastRequestAt = millis();
+#endif
       } else if ((now - maintStartedAt) >= MAINT_JOIN_TIMEOUT_MS) {
         maintExit("could not join home Wi-Fi in 20 s (out of range, or check secrets.h)", true);
       }

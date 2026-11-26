@@ -1,0 +1,12 @@
+services:
+  airwatch-receiver:
+    build: .
+    container_name: airwatch-receiver
+    restart: unless-stopped
+    ports:
+      - "8077:8077"
+    environment:
+      # Same value as UPLOAD_TOKEN in airwatch_v2/secrets.h
+      AIRWATCH_TOKEN: "change-me-to-a-long-random-string"
+    volumes:
+      - ./data:/data

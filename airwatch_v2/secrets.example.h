@@ -27,3 +27,11 @@
 // this line is deleted, WEB_PASSWORD is used (so make that 8+ characters).
 #define ROAD_AP_PASSWORD    "road password"
 // #define ROAD_AP_SSID     "airwatch"     // network name, if you want another
+
+// Optional: send the logs home on arrival. Each time the board joins your
+// home Wi-Fi it sends the mark log and alert journal to the receiver in the
+// repo's server/ folder, and clears them once the receiver confirms an exact
+// copy. Use the address of the machine running the receiver, and the same
+// token as its AIRWATCH_TOKEN. Delete these lines to turn it off.
+// #define UPLOAD_URL       "http://192.168.1.50:8077/upload"
+// #define UPLOAD_TOKEN     "a long random string"

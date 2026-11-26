@@ -37,6 +37,7 @@ it hears. The one exception is the web page, which needs the board's own Wi-Fi
 - [Building and flashing](#building-and-flashing)
 - [Using it](#using-it)
 - [Web page](#web-page)
+- [Sending logs home](#sending-logs-home)
 - [Logs](#logs)
 - [Serial commands](#serial-commands)
 - [The case](#the-case)
@@ -261,6 +262,54 @@ This is the only time the board transmits, and it does so at reduced power. Ever
 POST request must carry the header `X-AirWatch: 1`, so other websites can't use
 your saved login. The page sends it for you.
 
+## Sending logs home
+
+With two extra lines in `secrets.h`, the board sends its mark log and alert
+journal to a small receiver on your home network every time it joins your
+home Wi-Fi.
+- The receiver answers with the size and checksum of what it saved, and the
+  board only deletes its copy if both match.
+- If the receiver is down or the transfer breaks, the logs stay on the board and
+  are sent first on the next arrival.
+- The screen shows `UPLOADED`, or `UPLOAD FAIL` with two long beeps.
+
+**1. Start the receiver** on any always-on machine (Docker host, LXC, NAS, Pi).
+Set your own token in `server/docker-compose.yml`, then:
+
+```bash
+cd server
+```
+```bash
+docker compose up -d --build
+```
+
+Without Docker, it runs on any machine with Python 3, and needs nothing else:
+
+```bash
+AIRWATCH_TOKEN=your-token AIRWATCH_DATA=/srv/airwatch python3 server/receiver.py
+```
+
+**2. Point the board at it** in `airwatch_v2/secrets.h`, using that machine's
+address and the same token, then flash:
+
+```c
+#define UPLOAD_URL   "http://192.168.1.50:8077/upload"
+#define UPLOAD_TOKEN "your-token"
+```
+
+**3. Read the logs.** Open `http://<that machine>:8077` in a browser.
+- Each upload is a separate file under the date, for example
+  `2026-11-26/173012_drive70_marks.log`.
+- `all-marks.log` and `all-alerts.log` collect everything in one place.
+
+The files are also in `server/data/` on that machine. Your notes and
+corrections from the web page go into the next upload, so they reach the
+receiver too.
+
+The logs contain GPS positions, including where you park. Keep the receiver
+on your home network, and keep `server/data/` out of git (it is already in
+`server/.gitignore`).
+
 ## Logs
 
 Both logs live in the board's flash and survive power loss. You can read them on
@@ -404,6 +453,7 @@ case/
   airwatch_shell.stl    ready to print: shell (front face down)
   airwatch_lid.stl      ready to print: lid (outside face down)
 docs/images/            photos of the finished build
+server/                 log receiver for uploads on arrival (Docker or plain Python)
 ```
 
 ## License

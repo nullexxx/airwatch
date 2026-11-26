@@ -1,6 +1,8 @@
 services:
   airwatch-receiver:
-    build: .
+    # Built by GitHub Actions from this folder. To build it yourself instead,
+    # replace the image line with:  build: .
+    image: ghcr.io/nullexxx/airwatch-receiver:latest
     container_name: airwatch-receiver
     restart: unless-stopped
     ports:

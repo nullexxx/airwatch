@@ -1,0 +1,62 @@
+# Compiles the firmware on every change, so a broken build shows up as a red
+# X on GitHub. Placeholder settings only; nothing is published (a real build
+# contains your Wi-Fi and web passwords, so it is made on your own machine).
+name: Firmware build check
+
+on:
+  push:
+    paths:
+      - "airwatch_v2/**"
+      - ".github/workflows/firmware-check.yml"
+  pull_request:
+    paths:
+      - "airwatch_v2/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FQBN: esp32:esp32:XIAO_ESP32S3:PSRAM=opi
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [no-secrets, home-and-upload]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-esp32-3.3.12-libs-v1
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install core and libraries (versions the firmware is tested with)
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install "Adafruit NeoPixel@1.15.5" "Adafruit GFX Library@1.13.0" "Adafruit SSD1306@2.5.17" "NimBLE-Arduino@2.5.2"
+
+      - name: Placeholder secrets.h
+        if: matrix.config == 'home-and-upload'
+        run: |
+          cat > airwatch_v2/secrets.h <<'H'
+          #define HOME_WIFI_SSID     "ExampleNet"
+          #define HOME_WIFI_PASSWORD "example-password"
+          #define HOME_WIFI_BSSID    "AC:91:9B:12:34:56"
+          #define WEB_USER           "admin"
+          #define WEB_PASSWORD       "example-password"
+          #define ROAD_AP_PASSWORD   "example-password"
+          #define UPLOAD_URL         "http://192.168.1.50:8077/upload"
+          #define UPLOAD_TOKEN       "example-token"
+          H
+
+      - name: Compile
+        run: arduino-cli compile --fqbn "$FQBN" --warnings default airwatch_v2

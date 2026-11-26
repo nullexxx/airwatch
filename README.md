@@ -151,6 +151,19 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi air
 
 In the Arduino IDE, choose the "XIAO_ESP32S3" board and set PSRAM to "OPI PSRAM".
 
+**Updating over Wi-Fi.** To make a file for the web page's Firmware tab instead
+of flashing over USB:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi --output-dir build airwatch_v2
+```
+
+Then upload `build/airwatch_v2.ino.bin` on the Firmware tab.
+
+GitHub only checks that the firmware builds (with placeholder settings). It
+doesn't publish firmware files, because a real build contains your Wi-Fi and
+web passwords from `secrets.h`.
+
 **Storage layout.** `partitions.csv` in the sketch folder is picked up
 automatically. It gives two 2 MB firmware slots (for wireless updates) and about
 3.9 MB for the logs.
@@ -274,14 +287,12 @@ home Wi-Fi.
 - The screen shows `UPLOADED`, or `UPLOAD FAIL` with two long beeps.
 
 **1. Start the receiver** on any always-on machine (Docker host, LXC, NAS, Pi).
-Set your own token in `server/docker-compose.yml`, then:
-
-```bash
-cd server
-```
-```bash
-docker compose up -d --build
-```
+GitHub builds it as `ghcr.io/nullexxx/airwatch-receiver:latest`, for both PCs
+and Raspberry Pis.
+- **Docker Compose:** set your own token in `server/docker-compose.yml`, then
+  run `docker compose up -d` in that folder.
+- **Arcane, Portainer or similar:** create a new stack or project, paste the
+  contents of `server/docker-compose.yml`, change the token, and deploy.
 
 Without Docker, it runs on any machine with Python 3, and needs nothing else:
 

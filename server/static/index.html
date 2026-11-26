@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirWatch Review</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root{--bg:#0f1216;--card:#171b21;--line:#262c35;--fg:#e3e7ec;--mute:#8b95a3;--acc:#5aa9ff;
+--hit:#3fb950;--miss:#f85149;--false:#d29922;--none:#6e7681;--high:#f85149;--low:#d29922;--echo:#5aa9ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{position:sticky;top:0;z-index:1000;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px}
+h1{font-size:17px;margin:0 0 8px}nav{display:flex;gap:6px;flex-wrap:wrap}
+nav button{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 11px;cursor:pointer;font:inherit}
+nav button.on{background:var(--acc);border-color:var(--acc);color:#000;font-weight:600}
+main{padding:14px 16px;max-width:1200px;margin:0 auto}section{display:none}section.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:0 0 12px}
+.msg{color:var(--mute);margin:4px 0 10px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:500;font-size:12px}tr.click{cursor:pointer}tr.click:hover{background:#1d232b}
+.tag{display:inline-block;border-radius:6px;padding:1px 7px;font-size:12px;font-weight:600;color:#000}
+.k-hit{background:var(--hit)}.k-miss{background:var(--miss)}.k-false{background:var(--false)}.k-none,.k-unknown{background:var(--none)}
+.t-HIGH{color:var(--high)}.t-LOW{color:var(--low)}.t-ECHO,.t-QUIET{color:var(--echo)}.t-IGNORED_FLEET{color:var(--mute)}
+.stats{display:flex;gap:10px;flex-wrap:wrap}.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}
+.stat b{display:block;font-size:22px}.stat span{color:var(--mute);font-size:12px}
+input[type=search],select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;width:100%;max-width:420px}
+.btn{background:var(--acc);color:#000;border:0;border-radius:8px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+.detail td{background:#12161b}.hint{color:var(--hit);font-weight:600}.home{color:var(--mute)}
+#map{height:72vh;border-radius:10px;border:1px solid var(--line)}
+.legend span{margin-right:12px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.scroll{overflow-x:auto}a{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+<h1>AirWatch Review</h1>
+<nav id="nav"></nav>
+</header>
+<main>
+<section id="overview"></section>
+<section id="marks"></section>
+<section id="police"></section>
+<section id="journal"></section>
+<section id="repeat"></section>
+<section id="fixed"></section>
+<section id="map-tab"><div class="card"><div class="legend" id="legend"></div></div><div id="map"></div></section>
+<section id="export"></section>
+</main>
+<script>
+const TABS=[["overview","Overview"],["marks","Marks"],["police","Police sightings"],["journal","Alert journal"],
+["repeat","Repeat offenders"],["fixed","Fixed routers"],["map-tab","Map"],["export","Export for Claude"]];
+const KIND={hit:"Confirmed",miss:"Missed",false:"False alarm",none:"Nothing there",unknown:"?"};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const get=async u=>{const r=await fetch(u);if(!r.ok)throw new Error(u+": "+r.status);return r.json()};
+const when=t=>t?new Date(t).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}):"no GPS time";
+const kindTag=k=>`<span class="tag k-${k}">${KIND[k]||k}</span>`;
+const tier=t=>`<span class="t-${esc(t)}">${esc(t==="ECHO"?"MINOR":t==="LOW"?"MAYBE":t==="HIGH"?"POLICE":t)}</span>`;
+const mapLink=(la,lo)=>la!=null?`<a target="_blank" rel="noopener" href="https://www.openstreetmap.org/?mlat=${la}&mlon=${lo}#map=18/${la}/${lo}">map</a>`:"";
+const loaded={};
+
+function show(id){
+  document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id===id));
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.t===id));
+  location.hash=id; if(!loaded[id]){loaded[id]=true;(LOADERS[id]||(()=>{}))().catch(e=>{$("#"+id).innerHTML=`<p class="msg">${esc(e.message)}</p>`})}
+  if(id==="map-tab"&&window._map)setTimeout(()=>_map.invalidateSize(),50);
+}
+$("#nav").innerHTML=TABS.map(([id,l])=>`<button data-t="${id}">${l}</button>`).join("");
+$("#nav").onclick=e=>{if(e.target.dataset.t)show(e.target.dataset.t)};
+
+const LOADERS={
+async overview(){
+  const s=await get("api/summary"),k=s.by_kind||{};
+  $("#overview").innerHTML=`<div class="stats">
+   <div class="stat"><b>${s.drives}</b><span>drives</span></div>
+   <div class="stat"><b>${s.marks}</b><span>marks</span></div>
+   <div class="stat"><b style="color:var(--hit)">${k.hit||0}</b><span>confirmed</span></div>
+   <div class="stat"><b style="color:var(--miss)">${k.miss||0}</b><span>missed</span></div>
+   <div class="stat"><b style="color:var(--false)">${k.false||0}</b><span>false alarms</span></div>
+   <div class="stat"><b>${s.alerts}</b><span>journal alerts</span></div></div>
+   <div class="card" style="margin-top:12px"><p class="msg">Everything here is built from the uploads the board sends on arrival
+   (${s.files} files so far${s.vendors_loaded?"":"; vendor names are still downloading"}).
+   <b>Police sightings</b> ranks what was heard where you saw police; <b>Fixed routers</b> lists things that alert in the same spot
+   every time; <b>Export for Claude</b> makes one file to drop into a chat. Raw uploads: <a href="files">files</a>.</p></div>`;
+},
+async marks(){
+  const ms=await get("api/marks");
+  const el=$("#marks");
+  el.innerHTML=`<input type="search" id="mq" placeholder="Filter (drive, MAC, name, kind…)"><p class="msg">${ms.length} marks, newest first. Click one to see everything heard.</p>
+  <div class="scroll"><table><thead><tr><th>Mark</th><th>When</th><th>Kind</th><th>Alerting</th><th>Speed</th><th></th></tr></thead><tbody id="mt"></tbody></table></div>`;
+  const draw=()=>{const q=$("#mq").value.toLowerCase();$("#mt").innerHTML=ms.filter(m=>!q||JSON.stringify(m).toLowerCase().includes(q)).map(m=>
+   `<tr class="click" data-id="${m.id}"><td>Drive ${m.drive} · ${m.mark}${m.followup_of?" (follow-up)":""}</td><td>${when(m.time)}</td><td>${kindTag(m.kind)}</td>
+    <td>${m.alert_lines.length?m.alert_lines.map(a=>`${tier(a.tier)} ${esc(a.label||"")}${a.ssid?` "${esc(a.ssid)}"`:""}`).join("<br>"):'<span class="msg">nothing</span>'}</td>
+    <td>${m.mph!=null?Math.round(m.mph)+" mph":""}</td><td>${mapLink(m.lat,m.lon)}</td></tr>`).join("")};
+  $("#mq").oninput=draw;draw();
+  $("#mt").onclick=async e=>{const tr=e.target.closest("tr.click");if(!tr||e.target.tagName==="A")return;
+    const next=tr.nextElementSibling;if(next&&next.classList.contains("detail")){next.remove();return}
+    const m=await get("api/mark?id="+tr.dataset.id);const d=document.createElement("tr");d.className="detail";
+    d.innerHTML=`<td colspan="6">${markDetail(m)}</td>`;tr.after(d)};
+},
+async police(){
+  const p=await get("api/police");
+  $("#police").innerHTML=`<p class="msg">Every mark where you saw police. Under each, what was heard there ranked by how interesting it is:
+   heard rarely anywhere else, strong (close), a police-type vendor (<span class="hint">green</span>), and not home internet gear.
+   This is the comparison to use when the board missed a cruiser.</p>`+(p.sightings.length?p.sightings.map(s=>`<div class="card">
+   <b>Drive ${s.drive} · mark ${s.mark}</b> ${kindTag(s.kind)} <span class="msg">${when(s.time)} · ${s.mph!=null?Math.round(s.mph)+" mph":""}
+   ${s.lead?" · alerting on "+esc(s.lead):""}</span> ${mapLink(s.lat,s.lon)}
+   <div class="scroll"><table><thead><tr><th>Score</th><th>Transmitter</th><th>Vendor</th><th>Name</th><th>Signal</th><th>Other marks</th></tr></thead><tbody>
+   ${s.candidates.map(c=>`<tr><td>${c.score}</td><td class="mono">${esc(c.kind)} ${esc(c.mac)}${c.alerted?` <span class="t-LOW">alerted</span>`:""}</td>
+     <td class="${c.hint?"hint":""}">${esc(c.vendor)}</td><td>${esc(c.ssid||c.name||"")}</td><td>${c.rssi??""}</td>
+     <td>${c.other_marks}${c.nothing_marks?` (${c.nothing_marks} "nothing")`:""}</td></tr>`).join("")}</tbody></table></div></div>`).join(""):'<p class="msg">No police marks yet.</p>');
+},
+async journal(){
+  const j=await get("api/journal");
+  $("#journal").innerHTML=`<div class="card"><b>Most frequent</b><p class="msg">Alerted on more than one drive.</p><div class="scroll"><table>
+   <thead><tr><th>Device</th><th>Vendor</th><th>Alerts</th><th>Drives</th><th>Best</th><th>Last</th></tr></thead><tbody>
+   ${j.frequent.map(f=>`<tr><td>${esc(f.label||"")} ${f.ssid?`"${esc(f.ssid)}"`:""}<div class="mono msg">${esc(f.mac)}</div></td><td>${esc(f.vendor)}</td>
+   <td>${f.alerts}</td><td>${f.drives}</td><td>${f.best??""}</td><td>${when(f.last)}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Nothing yet.</td></tr>'}</tbody></table></div></div>
+   <input type="search" id="jq" placeholder="Filter (name, MAC, tier…)"><div class="scroll"><table><thead><tr><th>When</th><th>What</th><th>Signal</th><th>Lasted</th><th>Speed</th><th></th></tr></thead><tbody id="jt"></tbody></table></div>`;
+  const draw=()=>{const q=$("#jq").value.toLowerCase();$("#jt").innerHTML=j.alerts.filter(a=>!q||JSON.stringify(a).toLowerCase().includes(q)).map(a=>
+   `<tr><td>${when(a.time)}<div class="msg">drive ${a.drive}</div></td><td>${tier(a.tier)} ${esc(a.label||"")} ${a.ssid?`"${esc(a.ssid)}"`:""}
+    <div class="mono msg">${esc(a.src)} ${esc(a.mac)} · ${esc(a.vendor)}${a.ongoing?" · cut short":""}${a.ended?" · ended: "+esc(a.ended):""}</div></td>
+    <td>${a.best??""}</td><td>${a.dur!=null?a.dur+" s":""}</td><td>${a.mph!=null?Math.round(a.mph)+" mph":""}</td><td>${mapLink(a.lat,a.lon)}</td></tr>`).join("")};
+  $("#jq").oninput=draw;draw();
+},
+async repeat(){
+  const r=await get("api/repeat");
+  $("#repeat").innerHTML=`<div class="card"><b>Alerted in more than one mark</b><p class="msg">And what you said was there each time.</p><div class="scroll"><table>
+   <thead><tr><th>Device</th><th>Vendor</th><th>Marks</th></tr></thead><tbody>
+   ${r.alerting.map(e=>`<tr><td>${esc(e.label||"")} ${e.ssid?`"${esc(e.ssid)}"`:""}<div class="mono msg">${esc(e.mac)}</div></td><td>${esc(e.vendor)}</td>
+    <td>${e.marks.map(m=>`D${m.drive}·${m.mark} ${kindTag(m.kind)}`).join(" ")}</td></tr>`).join("")||'<tr><td colspan="3" class="msg">Nothing yet.</td></tr>'}</tbody></table></div></div>
+   <div class="card"><b>Heard at police sightings in different places</b><p class="msg">Any transmitter, alerting or not, heard where you saw police in two or more places at least 500 m apart, on two or more drives
+   (${r.police_drive_count} drives with police so far). Ones also heard on other drives are usually just along your route.</p><div class="scroll"><table>
+   <thead><tr><th>Transmitter</th><th>Vendor</th><th>Places</th><th>Police drives</th><th>Other drives</th><th>Best</th></tr></thead><tbody>
+   ${r.sightings.map(e=>`<tr><td class="mono">${esc(e.mac)}<div>${esc(e.ssid||"")}</div></td><td>${esc(e.vendor)}</td><td>${e.places}</td>
+    <td>${e.police_drives.join(", ")}</td><td>${e.other_drives.join(", ")||"none"}</td><td>${e.best}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Needs police sightings in at least two places, on two drives.</td></tr>'}</tbody></table></div></div>`;
+},
+async fixed(){
+  const f=await get("api/fixed");
+  $("#fixed").innerHTML=`<p class="msg">Things that alerted and were heard at the same spot (within 300 m) on different drives: most likely a router on a building,
+   not a vehicle. For you to review; nothing is silenced automatically. If one keeps beeping, tell Claude and it can go on the quiet list.</p><div class="scroll"><table>
+   <thead><tr><th>Device</th><th>Vendor</th><th>Drives</th><th>Spread</th><th></th><th></th></tr></thead><tbody>
+   ${f.map(e=>`<tr><td>${tier(e.tier)} ${esc(e.label||"")} ${e.ssid?`"${esc(e.ssid)}"`:""}<div class="mono msg">${esc(e.mac)}</div></td><td>${esc(e.vendor)}</td>
+    <td>${e.drives.length} (${e.drives.join(", ")})</td><td>${e.spread_m} m</td><td>${e.stationary?'<b>stationary</b>':'<span class="msg">moves</span>'}</td><td>${mapLink(e.lat,e.lon)}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Nothing has alerted in the same place on two drives yet.</td></tr>'}</tbody></table></div>`;
+},
+async "map-tab"(){
+  const d=await get("api/map");
+  const map=window._map=L.map("map");
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap contributors"}).addTo(map);
+  const col={hit:"#3fb950",miss:"#f85149",false:"#d29922",none:"#6e7681",unknown:"#6e7681"},tcol={HIGH:"#f85149",LOW:"#d29922",ECHO:"#5aa9ff",QUIET:"#5aa9ff"};
+  const pts=[];
+  const ml=L.layerGroup(d.marks.map(m=>{pts.push([m.lat,m.lon]);return L.circleMarker([m.lat,m.lon],{radius:8,color:"#000",weight:1,fillColor:col[m.kind],fillOpacity:.95})
+    .bindPopup(`<b>Drive ${m.drive} · mark ${m.mark}</b><br>${KIND[m.kind]}<br>${when(m.time)}${m.lead?"<br>"+esc(m.lead):""}`)})).addTo(map);
+  const al=L.layerGroup(d.alerts.map(a=>{pts.push([a.lat,a.lon]);return L.circleMarker([a.lat,a.lon],{radius:5,color:tcol[a.tier]||"#999",weight:2,fillOpacity:.3})
+    .bindPopup(`${esc(a.tier)} ${esc(a.label||"")}${a.ssid?` "${esc(a.ssid)}"`:""}<br>${esc(a.mac)} · best ${a.best}<br>drive ${a.drive}, ${when(a.time)}`)})).addTo(map);
+  const fl=L.layerGroup(d.fixed.map(f=>L.circle([f.lat,f.lon],{radius:Math.max(40,f.spread_m),color:"#a371f7",weight:2,fillOpacity:.1})
+    .bindPopup(`Fixed: ${esc(f.label||"")} ${f.ssid?`"${esc(f.ssid)}"`:""}<br>${esc(f.mac)}<br>drives ${f.drives.join(", ")}`))).addTo(map);
+  L.control.layers(null,{"Marks":ml,"Alerts (peak signal)":al,"Fixed routers":fl}).addTo(map);
+  if(pts.length)map.fitBounds(pts,{padding:[30,30],maxZoom:15});else map.setView([37.6,-77.5],11);
+  $("#legend").innerHTML=Object.entries({hit:"confirmed",miss:"missed",false:"false alarm",none:"nothing there"}).map(([k,l])=>`<span><i class="dot" style="background:${col[k]}"></i>${l}</span>`).join("")+
+   `<span><i class="dot" style="border:2px solid #d29922"></i>alert, where strongest</span><span><i class="dot" style="border:2px solid #a371f7"></i>fixed router</span>`;
+},
+async export(){
+  const ds=await get("api/drives");
+  $("#export").innerHTML=`<p class="msg">Pick drives and download one text file with their marks and alerts, vendor names filled in, ready to drop into a chat with Claude.
+   It contains GPS positions, so share it only where you mean to.</p>
+   <div class="card"><label><input type="checkbox" id="xall"> all</label><div id="xl" style="columns:3 160px;margin-top:8px">
+   ${ds.map(d=>`<label style="display:block"><input type="checkbox" value="${d.drive}"> Drive ${d.drive} <span class="msg">${when(d.first)} · ${d.marks||0} marks, ${d.alerts||0} alerts</span></label>`).join("")||'<span class="msg">No drives yet.</span>'}
+   </div></div><a class="btn" id="xgo" href="#">Download export</a>`;
+  $("#xall").onchange=e=>document.querySelectorAll("#xl input").forEach(i=>i.checked=e.target.checked);
+  $("#xgo").onclick=e=>{const v=[...document.querySelectorAll("#xl input:checked")].map(i=>i.value);if(!v.length){e.preventDefault();alert("Pick at least one drive.");return}
+    e.target.href="export?drives="+v.join(",")};
+}};
+
+function markDetail(m){
+  const al=m.lines.filter(l=>l.kind==="ALERT"||l.kind==="EARLIER"),hd=m.lines.filter(l=>l.kind==="WIFI"||l.kind==="BLE");
+  return `${al.length?`<b>Alerting</b><table>${al.map(l=>`<tr><td>${esc(l.kind)}</td><td>${tier(l.tier)} ${esc(l.label||"")} ${l.ssid?`"${esc(l.ssid)}"`:""}</td>
+   <td class="mono">${esc(l.mac)}</td><td>${esc(l.vendor)}</td><td>best ${l.best??l.rssi}</td><td>${mapLink(l.at_lat,l.at_lon)}</td></tr>`).join("")}</table>`:""}
+   <b>Heard in the 30 s before (${hd.length})</b> <span class="msg">"elsewhere" = how many other marks it was heard in</span>
+   <div class="scroll"><table><thead><tr><th>Radio</th><th>Address</th><th>Vendor</th><th>Name</th><th>Signal</th><th>Elsewhere</th><th>Talking to</th></tr></thead><tbody>
+   ${hd.map(l=>`<tr><td>${esc(l.kind)}</td><td class="mono">${esc(l.mac)}${l.alerted?` <span class="t-LOW">${esc(l.alerted)}</span>`:""}</td><td>${esc(l.vendor)}</td>
+    <td>${esc(l.ssid||l.name||"")}${l.wps?`<div class="msg">WPS: ${esc(l.wps)}</div>`:""}</td><td>${l.rssi??""}</td><td>${l.elsewhere}</td><td class="mono">${esc(l.peer||"")}</td></tr>`).join("")}</tbody></table></div>`;
+}
+show(TABS.some(t=>t[0]===location.hash.slice(1))?location.hash.slice(1):"overview");
+</script>
+</body>
+</html>

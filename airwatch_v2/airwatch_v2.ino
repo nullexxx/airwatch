@@ -4526,6 +4526,7 @@ th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertic
  <p class="msg" id="stmsg">While this page is open the board stays here. Wi-Fi detection is paused; Bluetooth detection and the mark button keep working.</p>
 </section>
 <section id="mk">
+ <p class="msg" id="mkRev" hidden>Marks and alerts are sent to your server each time the board gets home, so this page only shows what is new since then. Full history, map and analysis: <a target="_blank" rel="noopener" href="#">review page</a>.</p>
  <div class="row seg"><button class="b sm on" data-v="mkList">All marks</button><button class="b sm" data-v="mkJr">Alert journal</button><button class="b sm" data-v="mkRep">Repeat offenders</button></div>
  <div id="mkList">
  <div class="row"><button class="b" id="reload">Reload</button><a class="b" href="/marks.log?dl=1">Download</a>
@@ -4611,7 +4612,7 @@ const fmtWhen=iso=>new Date(iso).toLocaleString([], {weekday:'short',month:'shor
 const mapUrl=(la,lo)=>'https://maps.google.com/?q='+la+','+lo;
 const fmtS=s=>s<90?s+' s':s<5400?Math.round(s/60)+' min':(s/3600).toFixed(1)+' h';
 // ---- status ----
-async function status(){try{const j=await (await fetch('/status.json')).json();
+async function status(){try{const j=await (await fetch('/status.json')).json();if(j.review){const e=$('#mkRev');e.hidden=false;e.querySelector('a').href=j.review}
  $('#mode').textContent=j.mode=='road'?'On the road · own network':'Home · Wi-Fi '+j.homeRssi+' dBm';$('#build').textContent=j.build;
  $('#stmsg').textContent='While this page is open the board stays here. Wi-Fi detection is paused; Bluetooth detection and the mark button keep working. '+
   (j.mode=='road'?'It goes back to listening when you press Exit or after the idle time runs out.':'It goes back to listening a few seconds after you drive out of Wi-Fi range, when you press Exit, or after the idle time runs out.');
@@ -4840,6 +4841,14 @@ static void webStatus() {
   String j;
   j.reserve(720);
   j += "{\"mode\":"; jsonStr(j, maintRoad ? "road" : "home");
+#if AUTO_UPLOAD
+  {   // the review page on the log server: UPLOAD_URL without "/upload"
+    String r = UPLOAD_URL;
+    const int cut = r.lastIndexOf("/upload");
+    if (cut > 0) r = r.substring(0, cut);
+    j += ",\"review\":"; jsonStr(j, (r + "/").c_str());
+  }
+#endif
   j += ",\"muted\":"; j += audioMuted ? "true" : "false";
   j += ",\"gps\":{\"seen\":"; j += gpsSeen(now) ? "true" : "false";
   j += ",\"fix\":"; j += gpsFixFresh(now) ? "true" : "false";

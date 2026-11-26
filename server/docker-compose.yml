@@ -12,5 +12,7 @@ services:
       # are safest (openssl rand -hex 24). Compose treats "$" as a variable even
       # inside quotes: write each $ as $$ here (only here, not in secrets.h).
       AIRWATCH_TOKEN: "change-me-to-a-long-random-string"
+      # Optional: password for the review page (any user name works).
+      # AIRWATCH_UI_PASSWORD: "another password"
     volumes:
       - ./data:/data

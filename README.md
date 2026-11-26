@@ -313,14 +313,30 @@ that machine. Often the board is on a separate IoT network or VLAN that isn't
 allowed to connect into your main network. Allow the board's address to reach
 the receiver on TCP port 8077, or run the receiver on the board's network.
 
-**3. Read the logs.** Open `http://<that machine>:8077` in a browser.
-- Each upload is a separate file under the date, for example
-  `2026-11-26/173012_drive70_marks.log`.
-- `all-marks.log` and `all-alerts.log` collect everything in one place.
+**3. Review.** Open `http://<that machine>:8077`. The page has these tabs:
 
-The files are also in `server/data/` on that machine. Your notes and
-corrections from the web page go into the next upload, so they reach the
-receiver too.
+| Tab | Shows |
+|---|---|
+| Overview | totals: drives, marks, confirmed, missed, false alarms |
+| Marks | every mark, newest first; click one to see everything heard, with vendor names and how often each device turns up elsewhere |
+| Police sightings | for each mark where you saw police, what was heard there, ranked: rare elsewhere, strong, police-type vendor, and not home or store Wi-Fi |
+| Alert journal | every alert, plus the ones that keep coming back |
+| Repeat offenders | devices alerting in several marks; transmitters heard where you saw police in different places |
+| Fixed routers | things that alert at the same spot on different drives (a building, not a vehicle), for you to review |
+| Map | marks, alert positions and fixed routers on OpenStreetMap |
+| Export for Claude | one text file for the drives you pick, vendor names filled in, to drop into a chat |
+
+How it works underneath:
+- Vendor names come from the IEEE registry and the Bluetooth company list, which
+  the receiver downloads into `data/vendors/` and refreshes monthly.
+- Everything is indexed in `data/airwatch.db` (SQLite). The raw uploads stay the
+  source of truth: delete the database and it is rebuilt from them on the next
+  start.
+- The raw files are listed at `/files`.
+- To protect the page with a password, set `AIRWATCH_UI_PASSWORD` in the compose
+  file (any user name works).
+- The board's own Marks tab links here, since after each upload it only holds
+  what's new.
 
 The logs contain GPS positions, including where you park. Keep the receiver
 on your home network, and keep `server/data/` out of git (it is already in
@@ -469,7 +485,7 @@ case/
   airwatch_shell.stl    ready to print: shell (front face down)
   airwatch_lid.stl      ready to print: lid (outside face down)
 docs/images/            photos of the finished build
-server/                 log receiver for uploads on arrival (Docker or plain Python)
+server/                 log receiver + review page (Docker or plain Python, SQLite index)
 ```
 
 ## License

@@ -6,7 +6,7 @@ import logparse
 from store import Store
 from vendors import Vendors
 
-MARKS = """#MARK drive=7 mark=1 saw=POLICE type=DURING_ALERT uptime=480s heard=3 obs_dropped=0 time=2026-11-25T18:29:18Z lat=37.64214 lon=-77.49438 mph=21 alerting=LOW lead="Cradlepoint GW" in_range=1
+MARKS = """#MARK drive=7 mark=1 saw=POLICE type=DURING_ALERT uptime=480s heard=3 obs_dropped=2 drops=1 ble_drops=0 time=2026-11-25T18:29:18Z lat=37.64214 lon=-77.49438 mph=21 alerting=LOW lead="Cradlepoint GW" in_range=1
 WIFI 00:30:44:B1:F8:1B frames=BR ch=6 rssi=-56 secs=9 ago=1844ms first=16780ms ssid="GRTC-MT Wifi" vie=8CFDF0 alerted=LOW
 WIFI 10:74:6F:BB:F1:1A frames=P ch=1 rssi=-82 secs=1 ago=19ms first=19ms ssid="GRTC-Radio" probes="GRTC-Radio|govt"
 BLE  00:25:DF:A3:CC:B6 addr=public rssi=-98 secs=1 ago=6658ms first=6658ms adv=0201060303FDFE
@@ -39,5 +39,6 @@ with tempfile.TemporaryDirectory() as d:
         fn()
     assert s.mark(s.marks()[0]["id"])["lines"]
     assert "GRTC-MT Wifi" in s.export([7])
+    assert s.drops() == [{"drive": 7, "drops": 1, "ble_drops": 0, "obs_dropped": 2}]
     assert any(c["value"] == "govt" for c in s.finder()["candidates"])
 print("smoke test ok")

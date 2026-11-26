@@ -159,6 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             "api/summary": STORE.summary, "api/marks": STORE.marks, "api/journal": STORE.journal,
             "api/repeat": STORE.repeat, "api/fixed": STORE.fixed, "api/police": STORE.police,
             "api/map": STORE.map, "api/drives": STORE.drives, "api/finder": STORE.finder,
+            "api/drops": STORE.drops,
         }
         if rel in ("", "index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as f:

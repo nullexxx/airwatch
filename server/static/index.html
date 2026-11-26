@@ -92,7 +92,7 @@ $("#nav").onclick=e=>{if(e.target.dataset.t)show(e.target.dataset.t)};
 
 const LOADERS={
 async overview(){
-  const s=await get("api/summary"),k=s.by_kind||{};
+  const [s,dr]=await Promise.all([get("api/summary"),get("api/drops")]),k=s.by_kind||{};
   $("#overview").innerHTML=`<div class="stats">
    <div class="stat"><b>${s.drives}</b><span>drives</span></div>
    <div class="stat"><b>${s.marks}</b><span>marks</span></div>
@@ -104,7 +104,13 @@ async overview(){
    <div class="card" style="margin-top:12px"><p class="msg">Everything here is built from the uploads the board sends on arrival
    (${s.files} files so far${s.vendors_loaded?"":"; vendor names are still downloading"}).
    <b>Police sightings</b> ranks what was heard where you saw police; <b>Fixed routers</b> lists things that alert in the same spot
-   every time; <b>Export for Claude</b> makes one file to drop into a chat. Raw uploads: <a href="files">files</a>.</p></div>`;
+   every time; <b>Export for Claude</b> makes one file to drop into a chat. Raw uploads: <a href="files">files</a>.</p></div>
+   <div class="card"><b>Dropped frames</b><p class="msg">The board's queues overflowed. <b>Target</b> drops are frames from matching devices
+   (they can delay or miss an alert); <b>background</b> drops only thin out marks and samples. Counts are per drive, from power-on.
+   If target drops show up regularly, tell Claude: the queue sizes can be raised.</p>
+   ${dr.length?`<table><thead><tr><th>Drive</th><th>Target Wi-Fi</th><th>Target Bluetooth</th><th>Background</th></tr></thead><tbody>
+   ${dr.map(d=>`<tr><td>${d.drive}</td><td class="${d.drops?"t-HIGH":""}">${d.drops}</td><td class="${d.ble_drops?"t-HIGH":""}">${d.ble_drops}</td><td>${d.obs_dropped}</td></tr>`).join("")}</tbody></table>`
+   :'<p class="msg">None recorded. (Target drops are logged from this firmware version on.)</p>'}</div>`;
 },
 async marks(){
   const ms=await get("api/marks");

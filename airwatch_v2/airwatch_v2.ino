@@ -2993,19 +2993,23 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, bool sample,
       (lastAlertValid && (now - lastAlertAt) < MARK_ALERT_RECENT_MS);
   static uint16_t sampleCount = 0;
   if (sample) {
-    f.printf("#SAMPLE drive=%lu n=%u type=%s uptime=%lus heard=%u obs_dropped=%lu",
+    f.printf("#SAMPLE drive=%lu n=%u type=%s uptime=%lus heard=%u obs_dropped=%lu drops=%lu ble_drops=%lu",
              static_cast<unsigned long>(bootCount), static_cast<unsigned>(++sampleCount),
              duringAlert ? "DURING_ALERT" : "NO_ALERT",
              static_cast<unsigned long>(now / 1000UL), static_cast<unsigned>(heard),
-             static_cast<unsigned long>(obsDrops));
+             static_cast<unsigned long>(obsDrops), static_cast<unsigned long>(totalDrops),
+             static_cast<unsigned long>(bleDrops));
   } else {
     ++markCount;
-    f.printf("#MARK drive=%lu mark=%u saw=%s type=%s uptime=%lus heard=%u obs_dropped=%lu",
+    // obs_dropped = background observations lost (marks only); drops /
+    // ble_drops = frames from matching targets lost (detection itself)
+    f.printf("#MARK drive=%lu mark=%u saw=%s type=%s uptime=%lus heard=%u obs_dropped=%lu drops=%lu ble_drops=%lu",
              static_cast<unsigned long>(bootCount), static_cast<unsigned>(markCount),
              sawNothing ? "NOTHING" : "POLICE",
              duringAlert ? "DURING_ALERT" : "NO_ALERT",
              static_cast<unsigned long>(now / 1000UL), static_cast<unsigned>(heard),
-             static_cast<unsigned long>(obsDrops));
+             static_cast<unsigned long>(obsDrops), static_cast<unsigned long>(totalDrops),
+             static_cast<unsigned long>(bleDrops));
   }
   if (followUp) f.printf(" followup_of=%u", static_cast<unsigned>(markCount - 1));
   if (heard >= recentCap) f.print(" table_full=yes");
@@ -4322,7 +4326,7 @@ static void refreshDisplay(bool forceRedraw) {
     // DROP n only while frames were lost in the last 30 s (e.g. a flash
     // write); otherwise back to the live W/B counts.
     static uint32_t dropsSeen = 0, dropAt = 0;
-    const uint32_t drops = totalDrops;
+    const uint32_t drops = totalDrops + bleDrops;   // matching Wi-Fi + Bluetooth frames lost
     if (drops != dropsSeen) { dropsSeen = drops; dropAt = now; }
     if (drops > 0 && (now - dropAt) < 30000) {
       display.printf("DROP %lu", static_cast<unsigned long>(drops % 100000UL));
@@ -4817,7 +4821,7 @@ async function status(){try{const j=await (await fetch('/status.json')).json();i
  const c=[['Sound',j.muted?'Muted':'On'],['GPS',gpsTxt],['Clock',j.clock?new Date(j.clock).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'Not set (needs a GPS fix)'],['Drive','#'+j.drive],['Marks this drive',j.marks],['Mark storage',j.logPct+'% · '+Math.round(j.logBytes/1024)+' KB'],
  ['Alert now',a],['Last alert',l],['Heard (30 s)','Wi-Fi '+j.wifi+' · BLE '+j.ble],['Uptime',fmtS(j.uptime)],
  ['Back to listening in',fmtS(j.idleLeft)+' idle'],['Address',j.ip],['Free memory',Math.round(j.heap/1024)+' KB'],
- ['BLE adverts',j.bleAdverts],['Obs dropped',j.obsDrops],['Last restart',j.lastReset||'?',j.lastResetBad]];
+ ['BLE adverts',j.bleAdverts],['Target frames dropped',(j.drops??0)+' Wi-Fi · '+(j.bleDrops??0)+' Bluetooth',(j.drops||j.bleDrops)?1:0],['Obs dropped',j.obsDrops],['Last restart',j.lastReset||'?',j.lastResetBad]];
  const g=$('#cards');g.textContent='';c.forEach(([k,v,bad])=>{const d=el('div','card'+(bad?' bad':''));d.append(el('div','k',k),el('div','v',String(v)));g.append(d)});
 }catch(e){$('#mode').textContent='offline'}}
 status();setInterval(status,3000);
@@ -5070,6 +5074,8 @@ static void webStatus() {
   j += ",\"heap\":"; j += static_cast<unsigned long>(esp_get_free_internal_heap_size());
   j += ",\"bleAdverts\":"; j += static_cast<unsigned long>(bleAdvertsSeen);
   j += ",\"obsDrops\":"; j += static_cast<unsigned long>(obsDrops);
+  j += ",\"drops\":"; j += static_cast<unsigned long>(totalDrops);
+  j += ",\"bleDrops\":"; j += static_cast<unsigned long>(bleDrops);
   j += ",\"alert\":{\"active\":"; j += alertView.active ? "true" : "false";
   if (alertView.active) {
     j += ",\"tier\":"; jsonStr(j, alertView.quiet ? "QUIET" : tierWord(alertView.tier));

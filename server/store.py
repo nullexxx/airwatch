@@ -291,6 +291,23 @@ class Store:
                 "vendors_loaded": bool(self.vendors.mac),
             }
 
+    def drops(self):
+        """Per drive, the highest drop counters any mark or sample header
+        reported (they count up from power-on): target frames lost (drops,
+        ble_drops) and background observations lost (obs_dropped)."""
+        per = {}
+        with self.db() as c:
+            for r in c.execute("SELECT drive, header FROM marks"):
+                d = logparse.kv(r["header"] or "")
+                e = per.setdefault(r["drive"], {"drive": r["drive"], "drops": 0, "ble_drops": 0, "obs_dropped": 0})
+                for k in ("drops", "ble_drops", "obs_dropped"):
+                    try:
+                        e[k] = max(e[k], int(d.get(k, 0)))
+                    except ValueError:
+                        pass
+        return sorted((e for e in per.values() if e["drops"] or e["ble_drops"] or e["obs_dropped"]),
+                      key=lambda e: -e["drive"])
+
     def marks(self):
         with self.db() as c:
             out = []

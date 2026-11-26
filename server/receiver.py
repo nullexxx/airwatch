@@ -148,9 +148,11 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, json.dumps(obj, default=str), "application/json")
 
     def do_GET(self):
+        url = urllib.parse.urlparse(self.path)
+        if url.path == "/healthz":          # before the password: Docker's health check has none
+            return self.reply(200, "ok")
         if not self.authorised():
             return
-        url = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(url.query)
         rel = urllib.parse.unquote(url.path).lstrip("/")
         api = {
@@ -163,8 +165,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, f.read(), "text/html; charset=utf-8")
         if rel in api:
             return self.json(api[rel]())
-        if rel == "healthz":
-            return self.reply(200, "ok")
         if rel == "api/mark":
             try:
                 mid = int(q.get("id", ["0"])[0] or 0)

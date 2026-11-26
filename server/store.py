@@ -163,7 +163,9 @@ class Store:
             finally:
                 c.close()
             if v and int(v[0]) != SCHEMA_VERSION:   # older layout: rebuild from the raw files
-                os.remove(self.path)
+                for suffix in ("", "-wal", "-shm"):   # WAL sidecars must go with it
+                    if os.path.exists(self.path + suffix):
+                        os.remove(self.path + suffix)
                 log(f"index: format changed (v{v[0]} -> v{SCHEMA_VERSION}), rebuilding from the uploads")
         with self.db() as c:
             c.execute("PRAGMA journal_mode=WAL")      # readers don't wait for an upload being indexed

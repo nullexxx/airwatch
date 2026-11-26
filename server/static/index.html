@@ -43,6 +43,7 @@ svg.tl{display:block}svg.tl .ax{stroke:var(--line)}svg.tl text{fill:var(--mute);
 <section id="overview"></section>
 <section id="marks"></section>
 <section id="police"></section>
+<section id="finder"></section>
 <section id="journal"></section>
 <section id="repeat"></section>
 <section id="fixed"></section>
@@ -50,7 +51,7 @@ svg.tl{display:block}svg.tl .ax{stroke:var(--line)}svg.tl text{fill:var(--mute);
 <section id="export"></section>
 </main>
 <script>
-const TABS=[["overview","Overview"],["marks","Marks"],["police","Police sightings"],["journal","Alert journal"],
+const TABS=[["overview","Overview"],["marks","Marks"],["police","Police sightings"],["finder","Signature finder"],["journal","Alert journal"],
 ["repeat","Repeat offenders"],["fixed","Fixed routers"],["map-tab","Map"],["export","Export for Claude"]];
 const KIND={hit:"Confirmed",miss:"Missed",false:"False alarm",none:"Nothing there",unknown:"?"};
 const $=s=>document.querySelector(s);
@@ -95,7 +96,8 @@ async overview(){
    <div class="stat"><b style="color:var(--hit)">${k.hit||0}</b><span>confirmed</span></div>
    <div class="stat"><b style="color:var(--miss)">${k.miss||0}</b><span>missed</span></div>
    <div class="stat"><b style="color:var(--false)">${k.false||0}</b><span>false alarms</span></div>
-   <div class="stat"><b>${s.alerts}</b><span>journal alerts</span></div></div>
+   <div class="stat"><b>${s.alerts}</b><span>journal alerts</span></div>
+   <div class="stat"><b>${s.samples||0}</b><span>background samples</span></div></div>
    <div class="card" style="margin-top:12px"><p class="msg">Everything here is built from the uploads the board sends on arrival
    (${s.files} files so far${s.vendors_loaded?"":"; vendor names are still downloading"}).
    <b>Police sightings</b> ranks what was heard where you saw police; <b>Fixed routers</b> lists things that alert in the same spot
@@ -127,6 +129,29 @@ async police(){
    ${s.candidates.map(c=>`<tr><td>${c.score}</td><td class="mono">${esc(c.kind)} ${esc(c.mac)}${c.alerted?` <span class="t-LOW">alerted</span>`:""}</td>
      <td class="${c.hint?"hint":""}">${esc(c.vendor)}</td><td>${esc(c.ssid||c.name||"")}</td><td>${c.rssi??""}</td>
      <td>${c.other_marks}${c.nothing_marks?` (${c.nothing_marks} "nothing")`:""}</td></tr>`).join("")}</tbody></table></div></div>`).join(""):'<p class="msg">No police marks yet.</p>');
+},
+async finder(){
+  const f=await get("api/finder");
+  const types=[...new Set(f.candidates.map(c=>c.type))].sort();
+  $("#finder").innerHTML=`<p class="msg">Every detail the board logged about each device (network names, names it searched for, vendor, codes in its
+   beacons, WPS model, Bluetooth company / services / name), counted where you saw police
+   (${f.police_snapshots} sightings) versus everywhere else (${f.baseline_snapshots} other marks and background samples).
+   Top of the list = heard at police sightings in several places and rarely otherwise: a candidate signature.
+   "Already caught" = it already makes the board alert. Copy the suggested line and send it to Claude (or edit the firmware) to add it, at MAYBE first.</p>
+   <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><input type="search" id="fq" placeholder="Filter…" style="max-width:300px">
+   <select id="ft" style="max-width:220px"><option value="">All kinds</option>${types.map(t=>`<option>${esc(t)}</option>`).join("")}</select>
+   <label class="msg"><input type="checkbox" id="fn"> hide already caught</label><label class="msg"><input type="checkbox" id="fm"> only 2+ places</label></div>
+   <div class="scroll"><table><thead><tr><th class="s">Score</th><th class="s">Kind</th><th class="s">Value</th><th class="s">Police places</th><th class="s">Police drives</th>
+   <th class="s">Elsewhere</th><th class="s">Lift</th><th class="s">Devices</th><th>Suggested signature</th></tr></thead><tbody id="fb"></tbody></table></div>`;
+  const draw=()=>{const q=$("#fq").value.toLowerCase(),t=$("#ft").value,hc=$("#fn").checked,mp=$("#fm").checked;
+   const rows=f.candidates.filter(c=>(!t||c.type===t)&&(!hc||!c.caught)&&(!mp||c.places>1)&&(!q||JSON.stringify(c).toLowerCase().includes(q)));
+   $("#fb").innerHTML=rows.map(c=>`<tr><td>${c.score}</td><td>${esc(c.type)}</td><td><b>${esc(c.value)}</b>${c.label?`<div class="msg">${esc(c.label)}</div>`:""}
+    ${c.caught?'<div class="t-LOW">already caught</div>':""}<div class="msg mono">${c.examples.map(x=>`${esc(x.mac)} ${x.rssi??""} (D${x.drive}·${x.mark})`).join("<br>")}</div></td>
+    <td>${c.places}</td><td data-v="${c.drives.length}">${c.drives.join(", ")}</td><td data-v="${c.base_hits}">${c.base_hits} of ${f.baseline_snapshots}</td><td>${c.lift}</td><td>${c.devices}</td>
+    <td><code>${esc(c.suggest)}</code> <button class="b" data-copy="${esc(c.suggest)}" style="padding:2px 8px;font-size:12px;cursor:pointer">copy</button></td></tr>`).join("")
+    ||'<tr><td colspan="9" class="msg">Nothing yet: needs marks where you saw police.</td></tr>'};
+  ["fq","ft","fn","fm"].forEach(id=>$("#"+id).oninput=draw);draw();
+  $("#fb").onclick=e=>{const b=e.target.closest("[data-copy]");if(!b)return;navigator.clipboard?.writeText(b.dataset.copy).then(()=>{b.textContent="copied";setTimeout(()=>b.textContent="copy",1200)})};
 },
 async journal(){
   const j=await get("api/journal");

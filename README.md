@@ -313,6 +313,12 @@ that machine. Often the board is on a separate IoT network or VLAN that isn't
 allowed to connect into your main network. Allow the board's address to reach
 the receiver on TCP port 8077, or run the receiver on the board's network.
 
+Besides marks and alerts, the board also sends **background samples**: every 5
+minutes while driving it silently saves a snapshot like a mark, without sound or
+a button press. These are the "normal traffic" the signature finder compares
+police sightings against, so it gets sharper with every drive. They're kept
+out of your marks lists, cleared by ERASE, and capped at 1.5 MB between uploads.
+
 **3. Review.** Open `http://<that machine>:8077`. The page has these tabs:
 
 | Tab | Shows |
@@ -320,6 +326,7 @@ the receiver on TCP port 8077, or run the receiver on the board's network.
 | Overview | totals: drives, marks, confirmed, missed, false alarms |
 | Marks | every mark, newest first; click one to see everything heard, with vendor names, when each device was first and last heard, and how often it turns up elsewhere (click any column to sort) |
 | Police sightings | for each mark where you saw police, what was heard there, ranked: rare elsewhere, strong, police-type vendor, and not home or store Wi-Fi |
+| Signature finder | every logged detail (network names, names devices searched for, vendor, beacon vendor codes, WPS model, Bluetooth company / services / name) counted at police sightings versus everywhere else; the top of the list is a candidate signature, with a ready-made line to add |
 | Alert journal | every alert with start and end time, plus the ones that keep coming back; click one for its signal over time and where it was first, most strongly and last heard |
 | Repeat offenders | devices alerting in several marks; transmitters heard where you saw police in different places |
 | Fixed routers | things that alert at the same spot on different drives (a building, not a vehicle), for you to review |

@@ -72,11 +72,12 @@ def parse_marks(text):
         line = raw.rstrip("\r")
         if not line:
             continue
-        if line.startswith("#MARK"):
+        if line.startswith("#MARK") or line.startswith("#SAMPLE"):
             d = kv(line)
+            sample = line.startswith("#SAMPLE")   # background sample: no button, saw=AUTO
             cur = {
-                "drive": _int(d.get("drive")), "mark": _int(d.get("mark")),
-                "saw": d.get("saw"), "type": d.get("type"),
+                "drive": _int(d.get("drive")), "mark": _int(d.get("n" if sample else "mark")),
+                "saw": "AUTO" if sample else d.get("saw"), "type": d.get("type"),
                 "uptime": _int(str(d.get("uptime", "")).rstrip("s")),
                 "heard": _int(d.get("heard")), "time": d.get("time"),
                 "lat": _float(d.get("lat")), "lon": _float(d.get("lon")), "mph": _speed(d),
@@ -107,6 +108,7 @@ def parse_marks(text):
                 "label": d.get("label"), "why": d.get("why"),
                 "at_lat": lat, "at_lon": lon, "at_mph": _speed(d) if d.get("at") else None,
                 "tl": _timeline(d.get("tl")), "from": _latlon(d.get("from")), "to": _latlon(d.get("to")),
+                "probes": [x for x in (d.get("probes") or "").split("|") if x] or None,
                 "raw": line,
             })
     return marks, notes

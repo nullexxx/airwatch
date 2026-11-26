@@ -78,6 +78,12 @@
  *   network name, WPS maker / model, the vendor codes in the beacon (vie=),
  *   who the device was talking to (peer=), how long it was in range
  *   (first=), and for Bluetooth the complete raw advert (adv=).
+ *   Wi-Fi lines also list up to 6 network names the device searched for
+ *   (probes="a|b"): a cruiser's laptop or radio looking for its agency's
+ *   networks is a strong clue even when its router is off.
+ *   BACKGROUND SAMPLES: every 5 min while driving, a silent snapshot (same
+ *   lines, header #SAMPLE) goes to /samples.log for the log server's
+ *   signature finder to compare police sightings against.
  *   Phone-type Bluetooth (random-address Apple / Microsoft / Samsung /
  *   Google-Android adverts that match no signature) is left out to keep
  *   marks readable.
@@ -410,6 +416,14 @@ constexpr size_t   OBS_THROTTLE_SLOTS         = 256;
 constexpr size_t   OBS_TEXT_LEN               = 32;      // SSID / BLE name characters kept (the full length)
 constexpr size_t   OBS_DETAIL_LEN             = 64;      // BLE: raw advert (31). Wi-Fi: WPS maker/model/name
 constexpr size_t   OBS_MAX_VENDOR_OUIS        = 4;       // distinct vendor-IE codes kept per Wi-Fi device
+constexpr size_t   RECENT_PROBES              = 6;       // network names a device searched for (PSRAM only)
+// Background samples: every SAMPLE_INTERVAL_MS while driving, a silent
+// snapshot like a mark (no sound, no button) goes to its own file. They are
+// the "normal traffic" baseline the log server's signature finder compares
+// police sightings against.
+constexpr uint32_t SAMPLE_INTERVAL_MS         = 5UL * 60UL * 1000UL;
+constexpr float    SAMPLE_MIN_MPH             = 10.0f;   // with a GPS fix: only while moving
+constexpr size_t   SAMPLES_FILE_MAX           = 1536UL * 1024UL;   // stop adding past this until uploaded
 constexpr uint32_t MARK_DEBOUNCE_MS           = 40;
 constexpr uint32_t MARK_LONG_PRESS_MS         = 800;     // held this long = "nothing is there"
 constexpr uint32_t MARK_LOCKOUT_MS            = 1000;
@@ -434,6 +448,7 @@ constexpr size_t   MARK_LOG_RESERVE_BYTES     = 64 * 1024;
 // the older one is deleted. So at most 2x this, oldest alerts dropped first.
 constexpr size_t   JOURNAL_FILE_MAX           = 128 * 1024;
 #define BOOT_COUNT_PATH "/boot.txt"
+#define SAMPLES_PATH    "/samples.log"
 
 // --- Home Wi-Fi maintenance mode (see header) ---
 constexpr uint32_t HOME_SETTLE_MS             = 3000;    // home heard this long before joining
@@ -924,6 +939,7 @@ struct RecentEntry {
   uint8_t  peer[6];        // Wi-Fi: the unicast address it was sending to
   uint8_t  ouis[OBS_MAX_VENDOR_OUIS * 3];
   uint8_t  detail[OBS_DETAIL_LEN];   // BLE: raw advert. Wi-Fi: WPS text, NUL-terminated
+  uint8_t  probeCount;     // names in recentProbes[slot]
   bool     marked;         // already written to the log during this stay in range
   int8_t   markedRssi;     // bestRssi when it was last written
   uint32_t markedAt;       // when it was last written
@@ -1138,6 +1154,10 @@ alignas(4) uint8_t obsQueueStorage[OBS_QUEUE_SIZE * sizeof(Observation)];
 RecentEntry* recentTable = nullptr;     // recentCap entries, allocated in setup()
 RecentIndex* recentIndex = nullptr;
 uint16_t*    recentOrder = nullptr;     // scratch for sorting a mark
+// Network names each recent device searched for (probe requests), up to
+// RECENT_PROBES per device. PSRAM only; without it, just one (text).
+typedef char ProbeNames[RECENT_PROBES][OBS_TEXT_LEN + 1];
+ProbeNames*  recentProbes = nullptr;
 size_t       recentCap   = 0;
 bool         recentInPsram = false;
 bool         dumpInProgress = false;    // mark log is printing: hold other serial output
@@ -2602,7 +2622,13 @@ static void observeWifiFrame(const HeaderEvent& h, const uint8_t* ssid, size_t s
                              const uint8_t* ies = nullptr, size_t iesLen = 0) {
 #if ENABLE_MARK_LOG
   if (isGroupMac(h.addr2)) return;
-  if (!obsThrottlePass(wifiObsThrottle, h.addr2, millis(), ies ? 0x9E3779B9UL : 0)) return;
+  // Salt: beacons separately from data, and each different searched-for name
+  // separately, so a burst of probes for several networks is not cut to one.
+  uint32_t salt = ies ? 0x9E3779B9UL : 0;
+  if (h.subtype == 0x04 && ssid && ssidLen) {
+    for (size_t i = 0; i < ssidLen; ++i) salt = (salt ^ ssid[i]) * 16777619UL;
+  }
+  if (!obsThrottlePass(wifiObsThrottle, h.addr2, millis(), salt)) return;
 
   Observation o{};
   memcpy(o.mac, h.addr2, 6);
@@ -2658,6 +2684,7 @@ static void recentNote(const Observation& o, uint32_t now) {
   RecentIndex& x = recentIndex[slot];
   if (isNew || (now - x.lastSeen) >= MARK_WINDOW_MS) {   // new, or stale: start over
     memset(e, 0, sizeof(*e));
+    if (recentProbes) memset(recentProbes[slot], 0, sizeof(ProbeNames));
     e->valid     = true;
     memcpy(e->mac, o.mac, 6);
     e->bestRssi  = o.rssi;
@@ -2682,6 +2709,17 @@ static void recentNote(const Observation& o, uint32_t now) {
   if (o.kind & OBS_HAS_CID) e->bleCompany = o.bleCompany;
   if (o.bleService) e->bleService = o.bleService;
   if (o.text[0]) { strncpy(e->text, o.text, sizeof(e->text) - 1); e->text[sizeof(e->text) - 1] = '\0'; }
+  // Every different network name it searches for (a cruiser laptop or radio
+  // looking for its agency's networks is one of the best clues there is).
+  if (recentProbes && (o.kind & OBS_PROBE_REQ) && o.text[0] && e->probeCount < RECENT_PROBES) {
+    bool known = false;
+    for (uint8_t i = 0; i < e->probeCount && !known; ++i) known = (strcmp(recentProbes[slot][i], o.text) == 0);
+    if (!known) {
+      strncpy(recentProbes[slot][e->probeCount], o.text, OBS_TEXT_LEN);
+      recentProbes[slot][e->probeCount][OBS_TEXT_LEN] = '\0';
+      ++e->probeCount;
+    }
+  }
   if (o.hasPeer) { memcpy(e->peer, o.peer, 6); e->hasPeer = true; }
   if (o.ouiCount) { memcpy(e->ouis, o.ouis, sizeof(e->ouis)); e->ouiCount = o.ouiCount; }
   if (o.kind & (OBS_BLE | OBS_BLE_PUBLIC)) {
@@ -2863,7 +2901,8 @@ class BufferedFileWriter : public Print {
 };
 uint8_t BufferedFileWriter::buf_[2048];
 
-static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& heard, uint16_t& written, bool& logFull) {
+static bool saveMark(uint32_t now, bool sawNothing, bool followUp, bool sample,
+                     uint16_t& heard, uint16_t& written, bool& logFull) {
   heard = 0;
   written = 0;
   logFull = false;
@@ -2877,8 +2916,9 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
 
   audioStop();   // the write below blocks loop() (the mark jingle plays after)
 
-  File file = LittleFS.open(MARK_LOG_PATH, FILE_APPEND);
+  File file = LittleFS.open(sample ? SAMPLES_PATH : MARK_LOG_PATH, FILE_APPEND);
   if (!file) return false;
+  if (sample && file.size() >= SAMPLES_FILE_MAX) { file.close(); return false; }   // full until uploaded
   BufferedFileWriter f(file);   // a few big writes instead of ~15 tiny ones per device
 
   // Strongest signal first: whatever you just drove past is near the top.
@@ -2896,13 +2936,22 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
 
   const bool duringAlert = alertView.active ||
       (lastAlertValid && (now - lastAlertAt) < MARK_ALERT_RECENT_MS);
-  ++markCount;
-  f.printf("#MARK drive=%lu mark=%u saw=%s type=%s uptime=%lus heard=%u obs_dropped=%lu",
-           static_cast<unsigned long>(bootCount), static_cast<unsigned>(markCount),
-           sawNothing ? "NOTHING" : "POLICE",
-           duringAlert ? "DURING_ALERT" : "NO_ALERT",
-           static_cast<unsigned long>(now / 1000UL), static_cast<unsigned>(heard),
-           static_cast<unsigned long>(obsDrops));
+  static uint16_t sampleCount = 0;
+  if (sample) {
+    f.printf("#SAMPLE drive=%lu n=%u type=%s uptime=%lus heard=%u obs_dropped=%lu",
+             static_cast<unsigned long>(bootCount), static_cast<unsigned>(++sampleCount),
+             duringAlert ? "DURING_ALERT" : "NO_ALERT",
+             static_cast<unsigned long>(now / 1000UL), static_cast<unsigned>(heard),
+             static_cast<unsigned long>(obsDrops));
+  } else {
+    ++markCount;
+    f.printf("#MARK drive=%lu mark=%u saw=%s type=%s uptime=%lus heard=%u obs_dropped=%lu",
+             static_cast<unsigned long>(bootCount), static_cast<unsigned>(markCount),
+             sawNothing ? "NOTHING" : "POLICE",
+             duringAlert ? "DURING_ALERT" : "NO_ALERT",
+             static_cast<unsigned long>(now / 1000UL), static_cast<unsigned>(heard),
+             static_cast<unsigned long>(obsDrops));
+  }
   if (followUp) f.printf(" followup_of=%u", static_cast<unsigned>(markCount - 1));
   if (heard >= recentCap) f.print(" table_full=yes");
   {
@@ -2930,9 +2979,11 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
     // come clearly closer since.
     if (followUp && r.marked && (now - r.markedAt) < MARK_WINDOW_MS &&
         static_cast<int>(r.bestRssi) < static_cast<int>(r.markedRssi) + MARK_FOLLOWUP_RSSI_DB) continue;
-    r.marked     = true;
-    r.markedAt   = now;
-    r.markedRssi = r.bestRssi;
+    if (!sample) {               // samples leave the follow-up bookkeeping alone
+      r.marked     = true;
+      r.markedAt   = now;
+      r.markedRssi = r.bestRssi;
+    }
     ++written;
 
     const bool ble = (r.kinds & (OBS_BLE | OBS_BLE_PUBLIC)) != 0;
@@ -2953,6 +3004,15 @@ static bool saveMark(uint32_t now, bool sawNothing, bool followUp, uint16_t& hea
              static_cast<unsigned long>(now - r.lastSeen),
              static_cast<unsigned long>(now - r.firstSeen));
     if (r.text[0])             f.printf(" %s=\"%s\"", ble ? "name" : "ssid", r.text);
+    if (!ble && r.probeCount && recentProbes) {           // every name it searched for
+      const ProbeNames& pn = recentProbes[&r - recentTable];
+      f.print(" probes=\"");
+      for (uint8_t i = 0; i < r.probeCount; ++i) {
+        if (i) f.print('|');
+        for (const char* c = pn[i]; *c; ++c) f.print(*c == '|' ? '/' : *c);
+      }
+      f.print('"');
+    }
     if (r.kinds & OBS_HAS_CID) f.printf(" cid=%04X", r.bleCompany);
     if (r.bleService)          f.printf(" svc=%04X", r.bleService);
     if (ble) {
@@ -3061,8 +3121,9 @@ static void eraseMarkLog() {
   LittleFS.remove(MARK_LOG_PATH);
   LittleFS.remove(JOURNAL_PATH);
   LittleFS.remove(JOURNAL_OLD_PATH);
+  LittleFS.remove(SAMPLES_PATH);
   markLogRefreshUsage();
-  Console.println(F("[LOG] mark log and alert journal erased"));
+  Console.println(F("[LOG] mark log, alert journal and background samples erased"));
 }
 
 // One line per finished alert:
@@ -3153,7 +3214,7 @@ static void takeMark(uint32_t now, bool sawNothing) {
   bool logFull = false;
   char line1[22];
   char line2[22];
-  if (saveMark(now, sawNothing, followUp, heard, written, logFull)) {
+  if (saveMark(now, sawNothing, followUp, false, heard, written, logFull)) {
     everMarked = true;
     lastMarkAt = now;
     snprintf(line1, sizeof(line1), "#%u %s", static_cast<unsigned>(markCount),
@@ -3170,6 +3231,21 @@ static void takeMark(uint32_t now, bool sawNothing) {
     snprintf(line2, sizeof(line2), logFull ? "LOG FULL: then ERASE" : "flash storage failed");
   }
   showNotice(line1, line2, now);
+}
+
+// Background sample every SAMPLE_INTERVAL_MS: not in the first 2 minutes
+// (still in the driveway), not in web mode, and with a GPS fix only while
+// moving. Silent: nothing on screen, no sound.
+static void sampleTick(uint32_t now) {
+  static uint32_t lastSample = 0;
+  if (maintActive || now < 120000UL) return;
+  if (lastSample && !timeReached(now, lastSample + SAMPLE_INTERVAL_MS)) return;
+  if (gpsFixFresh(now) && gps.speedMph < SAMPLE_MIN_MPH) return;   // stopped: wait until moving
+  lastSample = now;
+  uint16_t heard = 0, written = 0;
+  bool full = false;
+  if (saveMark(now, false, false, true, heard, written, full) && detLogReady())
+    Console.printf("[LOG] background sample: %u devices\n", static_cast<unsigned>(written));
 }
 
 // Debounced button on D1 or the BOOT button (both switch to GND).
@@ -5394,6 +5470,7 @@ static void webPrintEvents(uint32_t now) {
 #define MARKS_PENDING_PATH      "/marks.pending"
 #define ALERTS_PENDING_OLD_PATH "/alerts.pending.1"
 #define ALERTS_PENDING_PATH     "/alerts.pending"
+#define SAMPLES_PENDING_PATH    "/samples.pending"
 
 static uint32_t crc32Update(uint32_t crc, const uint8_t* p, size_t n) {   // zlib-compatible
   crc = ~crc;
@@ -5476,7 +5553,7 @@ static void uploadOnArrival(uint32_t now) {
   if (!markLogReady) return;
   audioStop();
   Console.printf("[UPLOAD] sending logs to %s\n", UPLOAD_URL);
-  showNotice("UPLOADING", "marks + alert journal", now);
+  showNotice("UPLOADING", "marks, alerts, samples", now);
   refreshDisplay(true);
   bool ok = true;
   // Twice: a copy left from a failed earlier attempt goes first, then
@@ -5484,7 +5561,8 @@ static void uploadOnArrival(uint32_t now) {
   for (int pass = 0; pass < 2 && ok; ++pass) {
     ok = uploadLog(MARK_LOG_PATH, MARKS_PENDING_PATH, "marks") &&
          uploadLog(JOURNAL_OLD_PATH, ALERTS_PENDING_OLD_PATH, "alerts") &&
-         uploadLog(JOURNAL_PATH, ALERTS_PENDING_PATH, "alerts");
+         uploadLog(JOURNAL_PATH, ALERTS_PENDING_PATH, "alerts") &&
+         uploadLog(SAMPLES_PATH, SAMPLES_PENDING_PATH, "samples");
   }
   markLogRefreshUsage();
   showNotice(ok ? "UPLOADED" : "UPLOAD FAIL", ok ? "logs cleared" : "kept, retry next time", millis());
@@ -5808,6 +5886,7 @@ void setup() {
   }
   recentIndex = static_cast<RecentIndex*>(calloc(recentCap, sizeof(RecentIndex)));
   recentOrder = static_cast<uint16_t*>(calloc(recentCap, sizeof(uint16_t)));
+  if (recentInPsram) recentProbes = static_cast<ProbeNames*>(ps_calloc(recentCap, sizeof(ProbeNames)));
   // Signal timelines (optional: without them alerts are logged as before)
   if (psramFound()) deviceTimeline = static_cast<int8_t*>(ps_calloc(DEVICE_CACHE_SIZE, TIMELINE_SECONDS));
   if (!deviceTimeline) deviceTimeline = static_cast<int8_t*>(calloc(DEVICE_CACHE_SIZE, TIMELINE_SECONDS));
@@ -6015,6 +6094,7 @@ void loop() {
 
 #if ENABLE_MARK_LOG
   markButtonTick(now);
+  sampleTick(now);
 #endif
 
   // 6. Display state machine

@@ -15,7 +15,7 @@ import time
 
 import logparse
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, kind TEXT, size INTEGER, ingested REAL);
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS lines(
   ssid TEXT, name TEXT, cid TEXT, svc TEXT, wps TEXT, vie TEXT, frames TEXT, peer TEXT,
   secs INT, first_ms INT, addr TEXT, adv TEXT, alerted TEXT, tier TEXT, src TEXT, label TEXT,
   why TEXT, at_lat REAL, at_lon REAL, at_mph REAL, ago_ms INT, tl TEXT,
-  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, raw TEXT);
+  from_lat REAL, from_lon REAL, to_lat REAL, to_lon REAL, probes TEXT, raw TEXT);
 CREATE INDEX IF NOT EXISTS lines_mac ON lines(mac);
 CREATE INDEX IF NOT EXISTS lines_mark ON lines(mark_id);
 CREATE TABLE IF NOT EXISTS notes(drive INT, mark INT, saw TEXT, text TEXT, raw TEXT UNIQUE);
@@ -84,6 +84,54 @@ def _decode(row):
     return row
 
 
+_BT_BASE = bytes.fromhex("FB349B5F8000008000100000")
+
+
+def ble_services(adv_hex):
+    """16-bit service IDs in a raw advert: UUID lists, service data, and their
+    32/128-bit forms when they sit on the Bluetooth base UUID."""
+    out = []
+    try:
+        b = bytes.fromhex(adv_hex or "")
+    except ValueError:
+        return out
+    i = 0
+    while i + 1 < len(b):
+        n = b[i]
+        if n == 0 or i + 1 + n > len(b):
+            break
+        t, d = b[i + 1], b[i + 2:i + 1 + n]
+        if t in (0x02, 0x03):
+            out += [d[k] | d[k + 1] << 8 for k in range(0, len(d) - 1, 2)]
+        elif t == 0x16 and len(d) >= 2:
+            out.append(d[0] | d[1] << 8)
+        elif t in (0x04, 0x05, 0x20):
+            step = len(d) if t == 0x20 else 4
+            for k in range(0, len(d) - 3, max(step, 4)):
+                if d[k + 2] == 0 and d[k + 3] == 0:
+                    out.append(d[k] | d[k + 1] << 8)
+        elif t in (0x06, 0x07, 0x21):
+            step = len(d) if t == 0x21 else 16
+            for k in range(0, len(d) - 15, max(step, 16)):
+                u = d[k:k + 16]
+                if u[:12] == _BT_BASE and u[14] == 0 and u[15] == 0:
+                    out.append(u[12] | u[13] << 8)
+        i += 1 + n
+    return sorted(set(out))
+
+
+def name_pattern(name):
+    """'E110-dbf' -> 'E110-###', 'RID-1581F3YT3K' -> 'RID-#': names that differ
+    only in a serial number or MAC tail collapse into one pattern."""
+    m = re.match(r"^(.*[-_ ])([0-9A-Za-z]{3,})$", name)
+    if not m:
+        return None
+    tail = m.group(2)
+    if not (re.search(r"\d", tail) or re.fullmatch(r"[0-9A-Fa-f]+", tail)):
+        return None          # a word ("Radio"), not a serial number
+    return m.group(1) + "###"
+
+
 def is_random(mac):
     h = (mac or "").replace(":", "")
     return len(h) >= 2 and bool(int(h[1], 16) & 2)
@@ -135,14 +183,15 @@ class Store:
 
     def ingest(self, path):
         name = os.path.basename(path)
-        kind = "marks" if "_marks" in name else "alerts" if "_alerts" in name else None
+        kind = ("marks" if "_marks" in name else "alerts" if "_alerts" in name
+                else "samples" if "_samples" in name else None)
         if not kind:
             return 0
         with self.lock, self.db() as c:
             if c.execute("SELECT 1 FROM files WHERE path=?", (path,)).fetchone():
                 return 0
             text = open(path, encoding="utf-8", errors="replace").read()
-            if kind == "marks":
+            if kind in ("marks", "samples"):
                 marks, notes = logparse.parse_marks(text)
                 for m in marks:
                     cur = c.execute(
@@ -157,13 +206,14 @@ class Store:
                     c.executemany(
                         "INSERT INTO lines(mark_id,kind,mac,rssi,best,ch,ssid,name,cid,svc,wps,vie,frames,peer,"
                         "secs,first_ms,addr,adv,alerted,tier,src,label,why,at_lat,at_lon,at_mph,ago_ms,tl,"
-                        "from_lat,from_lon,to_lat,to_lon,raw) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "from_lat,from_lon,to_lat,to_lon,probes,raw) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         [(mid, l["kind"], l["mac"], l["rssi"], l["best"], l["ch"], l["ssid"], l["name"],
                           l["cid"], l["svc"], l["wps"], l["vie"], l["frames"], l["peer"], l["secs"],
                           l["first_ms"], l["addr"], l["adv"], l["alerted"], l["tier"], l["src"], l["label"],
                           l["why"], l["at_lat"], l["at_lon"], l["at_mph"], l["ago_ms"],
-                          json.dumps(l["tl"]) if l["tl"] else None, *l["from"], *l["to"], l["raw"])
+                          json.dumps(l["tl"]) if l["tl"] else None, *l["from"], *l["to"],
+                          "|".join(l["probes"]) if l["probes"] else None, l["raw"])
                          for l in m["lines"]])
                 c.executemany("INSERT OR IGNORE INTO notes(drive,mark,saw,text,raw) VALUES(?,?,?,?,?)",
                               [(n["drive"], n["mark"], n["saw"], n["text"], n["raw"]) for n in notes])
@@ -199,10 +249,12 @@ class Store:
                 v = (v + " · " if v and v != "(random)" else "") + name
         return v
 
-    def _marks(self, c):
+    def _marks(self, c, samples=False):
+        """Marks in drive order. Background samples (saw=AUTO) only when asked."""
         saw = self._saw(c)
         rows = []
-        for r in c.execute("SELECT * FROM marks ORDER BY drive, mark"):
+        q = "SELECT * FROM marks" + ("" if samples else " WHERE saw != 'AUTO'") + " ORDER BY drive, mark"
+        for r in c.execute(q):
             d = dict(r)
             d["saw_effective"] = saw.get((d["drive"], d["mark"]), d["saw"])
             d["kind"] = self._kind(d["saw_effective"], d["type"])
@@ -222,6 +274,7 @@ class Store:
                 "drives": c.execute("SELECT COUNT(DISTINCT drive) FROM (SELECT drive FROM marks "
                                     "UNION SELECT drive FROM alerts)").fetchone()[0],
                 "files": c.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+                "samples": c.execute("SELECT COUNT(*) FROM marks WHERE saw='AUTO'").fetchone()[0],
                 "vendors_loaded": bool(self.vendors.mac),
             }
 
@@ -410,8 +463,111 @@ class Store:
         with self.db() as c:
             return [dict(r) for r in c.execute(
                 "SELECT drive, MIN(time) AS first, COUNT(*) AS n, SUM(kind='m') AS marks, SUM(kind='a') AS alerts FROM ("
-                " SELECT drive, time, 'm' AS kind FROM marks UNION ALL SELECT drive, time, 'a' FROM alerts"
+                " SELECT drive, time, 'm' AS kind FROM marks WHERE saw != 'AUTO' UNION ALL SELECT drive, time, 'a' FROM alerts"
                 ") GROUP BY drive ORDER BY drive DESC")]
+
+    def finder(self):
+        """Signature finder: every detail logged about the devices in each
+        snapshot, counted where you saw police versus everywhere else (other
+        marks and background samples). What turns up at police sightings in
+        several places and rarely otherwise is a candidate signature."""
+        with self.db() as c:
+            snaps = {m["id"]: m for m in self._marks(c, samples=True)}
+            police = {i for i, m in snaps.items() if m["saw_effective"] == "POLICE"}
+            base = set(snaps) - police
+            feats = {}   # (type, value) -> {"police": set(mark ids), "base": set(mark ids), "ex": [...], "caught": bool}
+            for l in c.execute("SELECT mark_id, kind, mac, rssi, ssid, name, cid, adv, wps, vie, frames, probes, "
+                               "alerted FROM lines WHERE kind IN ('WIFI','BLE')"):
+                mid = l["mark_id"]
+                if mid not in snaps:
+                    continue
+                keys = []
+                ssid, frames = l["ssid"], l["frames"] or ""
+                if l["kind"] == "WIFI":
+                    if ssid and ("B" in frames or "R" in frames):
+                        keys.append(("Network name", ssid))
+                    searched = set(l["probes"].split("|")) if l["probes"] else set()
+                    if ssid and frames.replace("D", "").replace("M", "") == "P":
+                        searched.add(ssid)
+                    keys += [("Searched-for name", x) for x in searched]
+                    for nm in ([ssid] if ssid else []) + list(searched):
+                        pat = name_pattern(nm)
+                        if pat:
+                            keys.append(("Name pattern", pat))
+                    if l["wps"] and l["wps"].strip(" /"):
+                        keys.append(("WPS device", l["wps"].strip()))
+                    for o in (l["vie"] or "").split(","):
+                        if len(o) == 6:
+                            keys.append(("Beacon vendor code", o.upper()))
+                else:
+                    if l["name"] and len(re.sub(r"[^0-9A-Za-z]", "", l["name"])) >= 3:   # not "." junk
+                        keys.append(("Bluetooth name", l["name"]))
+                    if l["cid"] and l["cid"].upper() not in ("FFFF", "0000"):   # placeholder IDs
+                        keys.append(("Bluetooth company", l["cid"].upper()))
+                    keys += [("Bluetooth service", f"{u:04X}") for u in ble_services(l["adv"])]
+                v = self.vendors.for_mac(l["mac"])
+                if v and v != "(random)":
+                    keys.append(("Vendor", v))
+                for k in keys:
+                    e = feats.setdefault(k, {"police": set(), "base": set(), "ex": [], "caught": False, "macs": set()})
+                    (e["police"] if mid in police else e["base"]).add(mid)
+                    e["caught"] |= bool(l["alerted"])
+                    e["macs"].add(l["mac"])
+                    if mid in police and len(e["ex"]) < 3:
+                        m = snaps[mid]
+                        e["ex"].append({"mac": l["mac"], "rssi": l["rssi"], "drive": m["drive"], "mark": m["mark"]})
+        n_pol, n_base = len(police), len(base)
+        out = []
+        for (typ, val), e in feats.items():
+            if not e["police"]:
+                continue
+            # separate places (500 m apart) among the police sightings it was heard at
+            places = []
+            for mid in e["police"]:
+                m = snaps[mid]
+                if m["lat"] is None or all(dist_m(m["lat"], m["lon"], p[0], p[1]) > 500 for p in places):
+                    places.append((m["lat"] if m["lat"] is not None else 999, m["lon"] or 0))
+            drives = {snaps[i]["drive"] for i in e["police"]}
+            rate_p = len(e["police"]) / max(n_pol, 1)
+            rate_b = (len(e["base"]) + 0.5) / (n_base + 1)
+            lift = rate_p / rate_b
+            score = len(places) * math.log2(1 + lift) * (1.0 if len(drives) > 1 else 0.6)
+            out.append({"type": typ, "value": val, "label": self._feature_label(typ, val),
+                        "places": len(places), "drives": sorted(drives), "police_marks": len(e["police"]),
+                        "base_hits": len(e["base"]), "lift": round(lift, 1), "score": round(score, 2),
+                        "caught": e["caught"], "devices": len(e["macs"]), "examples": e["ex"],
+                        "suggest": self._suggest(typ, val, e["macs"])})
+        out.sort(key=lambda x: -x["score"])
+        return {"candidates": out[:1000], "police_snapshots": n_pol, "baseline_snapshots": n_base}
+
+    def _feature_label(self, typ, val):
+        if typ == "Bluetooth company":
+            return self.vendors.for_cid(val)
+        if typ == "Beacon vendor code":
+            return self.vendors.for_mac(val + "000000")
+        return ""
+
+    def _suggest(self, typ, val, macs):
+        """A line to add to the firmware's tables (start every new one at MAYBE)."""
+        q = lambda x: x.upper().replace('"', "'")
+        if typ in ("Network name", "Searched-for name"):
+            return f'{{"{q(val)}", "<label>", CAT_LOW_CONF, MATCH_EXACT}},   // ssidTargets'
+        if typ == "Name pattern":
+            prefix = val.replace("###", "")
+            return f'{{"{q(prefix)}", "<label>", CAT_LOW_CONF, MATCH_PREFIX}},   // ssidTargets'
+        if typ == "WPS device":
+            part = val.split("/")[0].strip() or val
+            return f'{{"{q(part)}", "<label>", CAT_LOW_CONF, MATCH_SUBSTRING}},   // wpsTargets'
+        if typ == "Bluetooth company":
+            return f'{{0x{val}, "<label>", CAT_LOW_CONF}},   // bleCompanyTargets'
+        if typ == "Bluetooth service":
+            return f'{{0x{val}, "<label>", CAT_LOW_CONF}},   // bleServiceTargets'
+        if typ == "Bluetooth name":
+            return f'{{"{q(val)}", "<label>", CAT_LOW_CONF}},   // bleNameTargets'
+        if typ == "Vendor":
+            pre = sorted({m.replace(":", "")[:6] for m in macs if not is_random(m)})
+            return " ".join(f'{{0x{p}ULL, 24, "<label>", CAT_LOW_CONF}},' for p in pre[:3]) + "   // prefixTargets"
+        return "(no table for this yet: ask Claude)"
 
     def export(self, drives):
         """One text file for Claude: the raw lines of the chosen drives, with vendor names added."""
@@ -425,7 +581,8 @@ class Store:
                    "# was alerting). Lines under it are everything heard in the 30 s before it (WIFI/BLE) and what",
                    "# was alerting (ALERT / EARLIER). '# vendor:' comments are added by the server from the IEEE",
                    "# registry and the Bluetooth company list. 'A' lines are the alert journal.", ""]
-            for m in c.execute(f"SELECT * FROM marks WHERE drive IN ({q}) ORDER BY time, drive, mark", drives):
+            for m in c.execute(f"SELECT * FROM marks WHERE drive IN ({q}) AND saw != 'AUTO' "
+                               "ORDER BY time, drive, mark", drives):
                 eff = saw.get((m["drive"], m["mark"]))
                 out.append(m["header"] + (f"   # corrected: saw={eff}" if eff and eff != m["saw"] else ""))
                 for l in c.execute("SELECT raw, mac, cid FROM lines WHERE mark_id=? ORDER BY id", (m["id"],)):

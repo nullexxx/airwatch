@@ -37,7 +37,7 @@ UI_PASSWORD = os.environ.get("AIRWATCH_UI_PASSWORD", "")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 STORE = None
 MAX_BYTES = 16 * 1024 * 1024
-KINDS = {"marks", "alerts"}
+KINDS = {"marks", "alerts", "samples"}
 
 
 def log(msg):
@@ -150,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         api = {
             "api/summary": STORE.summary, "api/marks": STORE.marks, "api/journal": STORE.journal,
             "api/repeat": STORE.repeat, "api/fixed": STORE.fixed, "api/police": STORE.police,
-            "api/map": STORE.map, "api/drives": STORE.drives,
+            "api/map": STORE.map, "api/drives": STORE.drives, "api/finder": STORE.finder,
         }
         if rel in ("", "index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as f:

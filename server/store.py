@@ -424,9 +424,12 @@ class Store:
             lon = sum(p[2] for p in pts) / len(pts)
             spread = max(dist_m(lat, lon, p[1], p[2]) for p in pts)
             i = info.get(mac, {})
+            b = mac.split(":")
+            quiet = ("{" + ", ".join("0x" + x for x in b) + "},   // "
+                     + (i.get("ssid") or i.get("label") or "") + "  (quietMacTargets)")
             out.append({"mac": mac, "label": i.get("label"), "ssid": i.get("ssid"), "tier": i.get("tier"),
                         "vendor": self.vendor(mac), "drives": drives, "lat": round(lat, 5), "lon": round(lon, 5),
-                        "spread_m": round(spread), "stationary": spread <= radius_m})
+                        "spread_m": round(spread), "stationary": spread <= radius_m, "quiet": quiet})
         out.sort(key=lambda e: (not e["stationary"], -len(e["drives"])))
         return out
 

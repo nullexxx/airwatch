@@ -192,10 +192,13 @@ async repeat(){
 async fixed(){
   const f=await get("api/fixed");
   $("#fixed").innerHTML=`<p class="msg">Things that alerted and were heard at the same spot (within 300 m) on different drives: most likely a router on a building,
-   not a vehicle. For you to review; nothing is silenced automatically. If one keeps beeping, tell Claude and it can go on the quiet list.</p><div class="scroll"><table>
-   <thead><tr><th>Device</th><th>Vendor</th><th>Drives</th><th>Spread</th><th></th><th></th></tr></thead><tbody>
+   not a vehicle. For you to review; nothing is silenced automatically. To silence one, copy its line into <code>quietMacTargets</code> in the firmware
+   (or send it to Claude): it stays in the logs, just without the beep.</p><div class="scroll"><table>
+   <thead><tr><th>Device</th><th>Vendor</th><th>Drives</th><th>Spread</th><th></th><th></th><th>Quiet-list line</th></tr></thead><tbody id="fxb">
    ${f.map(e=>`<tr><td>${tier(e.tier)} ${esc(e.label||"")} ${e.ssid?`"${esc(e.ssid)}"`:""}<div class="mono msg">${esc(e.mac)}</div></td><td>${esc(e.vendor)}</td>
-    <td>${e.drives.length} (${e.drives.join(", ")})</td><td>${e.spread_m} m</td><td>${e.stationary?'<b>stationary</b>':'<span class="msg">moves</span>'}</td><td>${mapLink(e.lat,e.lon)}</td></tr>`).join("")||'<tr><td colspan="6" class="msg">Nothing has alerted in the same place on two drives yet.</td></tr>'}</tbody></table></div>`;
+    <td>${e.drives.length} (${e.drives.join(", ")})</td><td>${e.spread_m} m</td><td>${e.stationary?'<b>stationary</b>':'<span class="msg">moves</span>'}</td><td>${mapLink(e.lat,e.lon)}</td>
+    <td>${e.stationary?`<button class="b" data-copy="${esc(e.quiet)}" style="padding:2px 8px;font-size:12px;cursor:pointer">copy</button>`:""}</td></tr>`).join("")||'<tr><td colspan="7" class="msg">Nothing has alerted in the same place on two drives yet.</td></tr>'}</tbody></table></div>`;
+  $("#fxb").onclick=e=>{const b=e.target.closest("[data-copy]");if(!b)return;navigator.clipboard?.writeText(b.dataset.copy).then(()=>{b.textContent="copied";setTimeout(()=>b.textContent="copy",1200)})};
 },
 async "map-tab"(){
   const d=await get("api/map");

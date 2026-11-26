@@ -691,7 +691,7 @@ const SSIDTarget ssidTargets[] = {
   {"WATCHGUARD",  "WatchGuard Video",  CAT_HIGH_CONF, MATCH_PREFIX},
   {"VISTA",       "Motorola Vista",    CAT_LOW_CONF,  MATCH_PREFIX},    // LOW: "Vista..." apartments, hotels
   {"POLICE",      "Police Network",    CAT_HIGH_CONF, MATCH_SUBSTRING},
-  {"PATROL",      "Patrol Unit",       CAT_HIGH_CONF, MATCH_SUBSTRING},
+  {"PATROL",      "Patrol Unit",       CAT_LOW_CONF,  MATCH_SUBSTRING},   // LOW: "Paw Patrol", security patrols
   {"GETAC",       "Getac Unit",        CAT_HIGH_CONF, MATCH_PREFIX},
   {"MDT-",        "Mobile Terminal",   CAT_HIGH_CONF, MATCH_PREFIX},
   {"COBAN",       "Coban Unit",        CAT_HIGH_CONF, MATCH_PREFIX},
@@ -723,6 +723,8 @@ const SSIDTarget ssidTargets[] = {
   {"IBR1",        "Cradlepoint IBR",   CAT_LOW_CONF,  MATCH_PREFIX},
   {"R1900-",      "Cradlepoint R1900", CAT_LOW_CONF,  MATCH_PREFIX},
   {"R920-",       "Cradlepoint R920",  CAT_LOW_CONF,  MATCH_PREFIX},
+  {"R980-",       "Cradlepoint R980",  CAT_LOW_CONF,  MATCH_PREFIX},
+  {"R2100-",      "Cradlepoint R2100", CAT_LOW_CONF,  MATCH_PREFIX},
   // [new] educated guesses, unconfirmed in the field
   {"ARBITRATOR",  "Arbitrator Video",  CAT_LOW_CONF,  MATCH_SUBSTRING},
   {"BODYWORN",    "BodyWorn Cam",      CAT_LOW_CONF,  MATCH_SUBSTRING}
@@ -760,6 +762,15 @@ constexpr size_t NUM_IGNORED_SSID_TARGETS = sizeof(ignoredSsidTargets) / sizeof(
 // These are the E-series branch / office models; vehicle models (IBR900,
 // IBR1700, R1900 ...) are deliberately not listed. To alert normally on one
 // of these again, delete its line.
+// Fixed routers you have reviewed (the log server's Fixed routers tab has a
+// copy button for each): treated like quiet-list names, i.e. silent but
+// still logged, along with their sibling radios. A police-specific (HIGH)
+// signature on one still alerts. The all-zero row is a placeholder.
+const uint8_t quietMacTargets[][6] = {
+  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+};
+constexpr size_t NUM_QUIET_MAC_TARGETS = sizeof(quietMacTargets) / sizeof(quietMacTargets[0]);
+
 const char* const quietSsidTargets[] = {
   "IBR200-",   // kiosk / signage / ATM gateway, not a vehicle router
   "MBR1200B-", // old small-office router, not a vehicle model
@@ -846,7 +857,13 @@ constexpr size_t NUM_BLE_SERVICE_TARGETS = sizeof(bleServiceTargets) / sizeof(bl
 
 const BleNameTarget bleNameTargets[] = {
   {"AXON",  "Axon BLE",  CAT_HIGH_CONF},
-  {"TASER", "TASER BLE", CAT_HIGH_CONF}
+  {"TASER", "TASER BLE", CAT_HIGH_CONF},
+  // LOW: these names are not unique to police gear
+  {"WATCHGUARD", "WatchGuard BLE", CAT_LOW_CONF},
+  {"GETAC",      "Getac BLE",      CAT_LOW_CONF},
+  {"COBAN",      "Coban BLE",      CAT_LOW_CONF},
+  {"STALKER",    "Stalker BLE",    CAT_LOW_CONF},
+  {"BODYWORN",   "BodyWorn BLE",   CAT_LOW_CONF}
 };
 constexpr size_t NUM_BLE_NAME_TARGETS = sizeof(bleNameTargets) / sizeof(bleNameTargets[0]);
 
@@ -1701,6 +1718,24 @@ static inline const MacPrefixTarget* matchEligiblePrefixMac(const uint8_t mac[6]
   return matchPrefix(macToUint64(mac), matchedIndex);
 }
 
+// A router's extra networks (VAPs) are often sent from a derived address:
+// its own with the locally-administered bit set in the first byte (and
+// sometimes a counter), e.g. Cradlepoint 00:30:44:.. -> 02:/06:30:44:..
+// For beacons / probe responses from such an address, try the router
+// vendors whose block starts 00: (Cradlepoint, Sierra, Peplink...), LOW only.
+// Never for probe requests: phones use random addresses for those.
+static const MacPrefixTarget* matchDerivedApPrefix(const uint8_t mac[6], size_t* matchedIndex = nullptr) {
+  if (!mac || isGroupMac(mac) || (mac[0] & 0x03) != 0x02) return nullptr;
+  uint8_t base[6];
+  memcpy(base, mac, 6);
+  base[0] = 0x00;
+  size_t idx = 0;
+  const MacPrefixTarget* t = matchEligiblePrefixMac(base, &idx);
+  if (!t || t->category != CAT_LOW_CONF || t->prefixBits != 24) return nullptr;
+  if (matchedIndex) *matchedIndex = idx;
+  return t;
+}
+
 // One pattern test, shared by the SSID, ignore-list and WPS matchers.
 // text must already be upper-cased.
 static bool patternMatches(const char* text, const char* pattern, MatchMode mode) {
@@ -2260,11 +2295,21 @@ static void suppressDevice(const uint8_t mac[6], const char* reasonLabel, const 
 // same address apart from a small step in the last byte, or apart from the
 // first byte (how multi-SSID access points derive their extra BSSIDs).
 static bool macsAreSiblings(const uint8_t a[6], const uint8_t b[6]) {
-  if (memcmp(a, b, 5) == 0) {
-    const int diff = static_cast<int>(a[5]) - static_cast<int>(b[5]);
-    return diff != 0 && diff >= -7 && diff <= 7;
+  const int diff = static_cast<int>(a[5]) - static_cast<int>(b[5]);
+  if (memcmp(a, b, 5) == 0) return diff != 0 && diff >= -7 && diff <= 7;
+  if (memcmp(a + 1, b + 1, 4) != 0) return false;
+  // Derived (locally administered) BSSID: first byte differs, last byte the
+  // same or a small step away (some drivers change both).
+  return (a[0] != b[0]) && ((a[0] | b[0]) & 0x02) && diff >= -7 && diff <= 7;
+}
+
+static bool isQuietMac(const uint8_t mac[6]) {
+  for (size_t i = 0; i < NUM_QUIET_MAC_TARGETS; ++i) {
+    const uint8_t* q = quietMacTargets[i];
+    if (!(q[0] | q[1] | q[2] | q[3] | q[4] | q[5])) continue;     // placeholder
+    if (memcmp(q, mac, 6) == 0 || macsAreSiblings(q, mac)) return true;
   }
-  return (a[0] != b[0]) && (memcmp(a + 1, b + 1, 5) == 0);
+  return false;
 }
 
 // Is this address (or a sibling radio of it) currently silenced as a
@@ -3425,7 +3470,9 @@ void wifi_promiscuous_handler(void* buf, wifi_promiscuous_pkt_type_t type) {
     return;
   }
 
-  const bool prefixHit = headerHasTargetPrefix(header);
+  const bool prefixHit = headerHasTargetPrefix(header) ||
+      (type == WIFI_PKT_MGMT && (header.subtype == 0x08 || header.subtype == 0x05) &&
+       matchDerivedApPrefix(header.addr2));
 
   if (type == WIFI_PKT_MGMT) {
     const bool needsIePayload = (header.subtype == 0x04 ||
@@ -3561,6 +3608,8 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
                                     uint32_t now, bool isRemoteId = false) {
   size_t matchedPrefixIdx2 = 0;
   const MacPrefixTarget* prefixMatch2 = matchEligiblePrefixMac(event.addr2, &matchedPrefixIdx2);
+  if (!prefixMatch2 && event.frameType == WIFI_PKT_MGMT && (event.subtype == 0x08 || event.subtype == 0x05))
+    prefixMatch2 = matchDerivedApPrefix(event.addr2, &matchedPrefixIdx2);   // a router's extra network
 
   size_t matchedPrefixIdx1 = 0;
   const MacPrefixTarget* prefixMatch1 = matchEligiblePrefixMac(event.addr1, &matchedPrefixIdx1);
@@ -3637,7 +3686,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
     s.channel = event.channel;
     s.ssidSeen = (event.frameType == WIFI_PKT_MGMT &&
                   (event.subtype == 0x08 || event.subtype == 0x05));
-    s.quiet    = isQuietSsid && s.ssidSeen;
+    s.quiet    = (isQuietSsid && s.ssidSeen) || isQuietMac(event.addr2);
     s.ssid     = s.ssidSeen ? ssidText : nullptr;   // its own name, not one it is asking for
 
     bool high = false;

@@ -5375,9 +5375,14 @@ static bool uploadFile(const char* path, const char* kind) {
                   gotBytes == size && static_cast<uint32_t>(gotCrc) == crc;
   if (ok) {
     Console.printf("[UPLOAD] %s: %u bytes confirmed\n", kind, static_cast<unsigned>(size));
+  } else if (code < 0) {
+    // Never reached the receiver: wrong address, receiver not running, or a
+    // firewall between networks (e.g. an IoT VLAN that may not reach the LAN).
+    Console.printf("[UPLOAD] %s: could not connect to the receiver (%s) - kept on the board\n",
+                   kind, HTTPClient::errorToString(code).c_str());
   } else {
-    Console.printf("[UPLOAD] %s: not confirmed (HTTP %d, reply \"%s\") - kept on the board\n",
-                   kind, code, reply.substring(0, 60).c_str());
+    Console.printf("[UPLOAD] %s: receiver did not confirm a matching copy (HTTP %d, reply \"%s\") "
+                   "- kept on the board\n", kind, code, reply.substring(0, 60).c_str());
   }
   return ok;
 }

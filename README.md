@@ -308,6 +308,11 @@ address and the same token, then flash:
 #define UPLOAD_TOKEN "your-token"
 ```
 
+If the console says `could not connect to the receiver`, the board can't reach
+that machine. Often the board is on a separate IoT network or VLAN that isn't
+allowed to connect into your main network. Allow the board's address to reach
+the receiver on TCP port 8077, or run the receiver on the board's network.
+
 **3. Read the logs.** Open `http://<that machine>:8077` in a browser.
 - Each upload is a separate file under the date, for example
   `2026-11-26/173012_drive70_marks.log`.

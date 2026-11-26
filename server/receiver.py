@@ -50,8 +50,12 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         if url.path != "/upload":
             return self.reply(404, "not found")
-        if not TOKEN or not hmac.compare_digest(self.headers.get("X-AirWatch-Token", ""), TOKEN):
-            log(f"refused upload from {self.client_address[0]}: bad token")
+        got = self.headers.get("X-AirWatch-Token", "")
+        if not TOKEN or not hmac.compare_digest(got, TOKEN):
+            # Lengths only, never the tokens. A shorter token here usually means
+            # docker compose ate a "$..." part: write $ as $$ in the compose file.
+            log(f"refused upload from {self.client_address[0]}: bad token "
+                f"(got {len(got)} characters, expected {len(TOKEN)})")
             return self.reply(403, "bad token")
         q = urllib.parse.parse_qs(url.query)
         kind = q.get("kind", [""])[0]
@@ -142,5 +146,5 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set AIRWATCH_TOKEN (the same value as UPLOAD_TOKEN in secrets.h).")
     os.makedirs(DATA, exist_ok=True)
-    log(f"listening on port {PORT}, saving to {DATA}")
+    log(f"listening on port {PORT}, saving to {DATA} (token: {len(TOKEN)} characters)")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

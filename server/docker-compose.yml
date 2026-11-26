@@ -8,7 +8,9 @@ services:
     ports:
       - "8077:8077"
     environment:
-      # Same value as UPLOAD_TOKEN in airwatch_v2/secrets.h
+      # Same value as UPLOAD_TOKEN in airwatch_v2/secrets.h. Letters and digits
+      # are safest (openssl rand -hex 24). Compose treats "$" as a variable even
+      # inside quotes: write each $ as $$ here (only here, not in secrets.h).
       AIRWATCH_TOKEN: "change-me-to-a-long-random-string"
     volumes:
       - ./data:/data

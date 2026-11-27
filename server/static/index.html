@@ -92,7 +92,8 @@ $("#nav").onclick=e=>{if(e.target.dataset.t)show(e.target.dataset.t)};
 
 const LOADERS={
 async overview(){
-  const [s,dr]=await Promise.all([get("api/summary"),get("api/drops")]),k=s.by_kind||{};
+  const [s,dr,fw]=await Promise.all([get("api/summary"),get("api/drops"),get("api/firmware")]),k=s.by_kind||{};
+  const cur=fw.current,b=fw.builder,bd=fw.board;
   $("#overview").innerHTML=`<div class="stats">
    <div class="stat"><b>${s.drives}</b><span>drives</span></div>
    <div class="stat"><b>${s.marks}</b><span>marks</span></div>
@@ -105,6 +106,11 @@ async overview(){
    (${s.files} files so far${s.vendors_loaded?"":"; vendor names are still downloading"}).
    <b>Police sightings</b> ranks what was heard where you saw police; <b>Fixed routers</b> lists things that alert in the same spot
    every time; <b>Export for Claude</b> makes one file to drop into a chat. Raw uploads: <a href="files">files</a>.</p></div>
+   <div class="card"><b>Firmware</b><p class="msg">${cur
+     ?`Newest build: <b>${esc(cur.build)}</b>${cur.message?" &ndash; "+esc(cur.message):""} (built ${esc(cur.built_at||"?")}, ${(cur.size/1024|0)} KB, <a href="firmware/current.bin">download</a>).`
+     :"No build yet: add the airwatch-builder service (README: Automatic firmware updates)."}
+     ${bd?` The board last checked in ${esc(bd.at)} running <b class="${cur&&bd.have===cur.build?"":"t-LOW"}">${esc(bd.have||"?")}</b>${cur&&bd.have===cur.build?" (current)":cur?" (updates on its next arrival)":""}.`:""}
+     ${b?` Builder: ${esc(b.result)} at ${esc(b.at)}${b.error?`<br><span class="t-HIGH">${esc(b.error)}</span>`:""}.`:""}</p></div>
    <div class="card"><b>Dropped frames</b><p class="msg">The board's queues overflowed. <b>Target</b> drops are frames from matching devices
    (they can delay or miss an alert); <b>background</b> drops only thin out marks and samples. Counts are per drive, from power-on.
    If target drops show up regularly, tell Claude: the queue sizes can be raised.</p>

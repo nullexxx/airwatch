@@ -38,6 +38,7 @@ it hears. The one exception is the web page, which needs the board's own Wi-Fi
 - [Using it](#using-it)
 - [Web page](#web-page)
 - [Sending logs home](#sending-logs-home)
+- [Automatic firmware updates](#automatic-firmware-updates)
 - [Logs](#logs)
 - [Serial commands](#serial-commands)
 - [The case](#the-case)
@@ -61,7 +62,9 @@ it hears. The one exception is the web page, which needs the board's own Wi-Fi
   - **MINOR (ECHO):** traffic addressed to a matching device, and drones: the
     Remote ID most drones must broadcast (Wi-Fi and Bluetooth), and Skydio's
     addresses. One tick only, since hobby drones count too.
-- **Proximity heartbeat.** It ticks faster as the signal gets stronger.
+- **Proximity heartbeat.** For POLICE targets it ticks faster as the signal
+  gets stronger. MAYBE targets beep once when they appear, then stay quiet
+  (set `HEARTBEAT_MIN_TIER = TIER_LOW` to give them ticks too).
 - **Fleet filter.** Fire, EMS, transit and school-bus routers are recognised by
   their network names and silenced, along with their sibling radios. A
   police-specific signature always wins.
@@ -196,7 +199,7 @@ page. To enable the web page, copy `airwatch_v2/secrets.example.h` to
 | short-short-LONG | new **POLICE** target |
 | short-short | new **MAYBE** target |
 | single tick | new **MINOR** target |
-| ticks while in range | heartbeat: faster = closer |
+| ticks while in range | POLICE heartbeat: faster = closer (MAYBE: no ticks) |
 | one long beep | mark saved: police are there |
 | two long beeps | mark saved: nothing is there |
 | three falling / rising beeps | muted / sound back on |
@@ -233,18 +236,25 @@ It brightens as the signal gets stronger. Type `led` to run a colour test.
 ## Web page
 
 **At home.** When the board has heard your home network for about 3 s, it pauses
-Wi-Fi listening (Bluetooth keeps running) and joins it. Open
+Wi-Fi listening (Bluetooth keeps running) and joins it. It goes straight to the
+strongest access point it just heard, with no scan of every channel (it falls
+back to a full scan if that hasn't worked in 6 s). A MAYBE alert, or a quiet
+router near where you park, never delays this. A POLICE alert does only while
+you're moving, for at most 2 minutes. Open
 <http://airwatch.local>, or the address shown on the screen.
 - It goes back to listening when any of these happens:
   - about 5 s after you drive out of range (a connection that drops and comes
     back counts as leaving unless it stays up for 10 s);
   - straight away if the GPS shows you driving (10 mph or more for 3 s);
-  - when joining hasn't worked within 20 s;
+  - when joining hasn't worked within 20 s. It tries again while parked: after
+    20 s, 40 s, 80 s and so on, up to every 5 minutes;
   - when you press Exit;
   - after 15 minutes with no page requests.
-- After that it stays out of home mode until you have been away for 5 minutes,
+- After that it stays out of home mode until you have been away for 1 minute,
   or the power is cycled. So it won't grab your Wi-Fi again at the end of the
-  street.
+  street. If it left because the signal faded but you pulled in after all, it
+  also re-arms once home is strong (-75 dBm or better) for 10 s, or heard
+  without a break for 2 minutes.
 - While the GPS shows you driving, it doesn't enter home mode at all.
 - Your phone must be able to reach it: client isolation on an "IoT" network or a
   separate VLAN will block the page.
@@ -484,6 +494,43 @@ decide what to add or demote.
 The sketch also checks the tables at boot and stops with a message if one is
 malformed.
 
+## Automatic firmware updates
+
+Add the `airwatch-builder` service (it is already in
+`server/docker-compose.yml`) and the board keeps itself up to date:
+
+1. Every 30 minutes the builder checks this GitHub repository. When the
+   firmware (`airwatch_v2/`) or your `secrets.h` has changed, it builds it on
+   your server.
+2. It keeps only the newest build, in `data/firmware/`.
+3. Each time the board gets home, after the upload it asks the receiver for
+   the newest build. If it differs from its own, it downloads it, checks the
+   MD5, installs it into the spare firmware slot and reboots (`UPDATING`,
+   then `UPDATED` on the screen). Any failure keeps the old firmware running.
+
+The build name is the commit of the last firmware change plus 4 characters
+from `secrets.h`, e.g. `2ae04f6.9c1d`. The Status tab on the board, the boot
+log and the review page Overview all show it. A commit that only changes the
+server doesn't cause an update.
+
+**Set up once:**
+- Put your `secrets.h` (the same file you flash with, including `UPLOAD_URL`
+  and `UPLOAD_TOKEN`) next to the compose file, *before* starting the stack.
+  Otherwise Docker creates an empty folder called `secrets.h`. In Arcane, put
+  it in the project's folder on the host.
+- Redeploy the stack. The first build takes a few minutes; the review page
+  Overview shows `Builder: built`.
+- Install that first build by hand, because the firmware on the board now
+  doesn't know how to update itself yet. Download it from the Overview
+  (`download` link) and upload it on the board's web page, Firmware tab. Or
+  flash by USB as usual.
+
+Your passwords are compiled into the firmware, so the builds stay on your
+server. The builder image on GitHub contains only the public ESP32 toolchain.
+Your `secrets.h` is mounted read-only, and the copy used for a build is
+deleted afterwards. To test your own builds without them being replaced,
+add `#define AUTO_UPDATE 0` to `secrets.h`.
+
 ## Repository layout
 
 ```
@@ -497,6 +544,7 @@ case/
   airwatch_lid.stl      ready to print: lid (outside face down)
 docs/images/            photos of the finished build
 server/                 log receiver + review page (Docker or plain Python, SQLite index)
+server/builder/         firmware builder for automatic updates (Docker)
 ```
 
 ## License

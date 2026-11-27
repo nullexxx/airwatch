@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - "server/**"
+      - "!server/builder/**"
       - ".github/workflows/receiver-image.yml"
   workflow_dispatch:
 

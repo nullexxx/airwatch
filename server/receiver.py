@@ -6,7 +6,8 @@ Wi-Fi. Each upload is saved as its own file, and appended to a running
 all-marks / all-alerts file. The reply "OK <bytes> <crc32>" lets the board
 check that the copy is exact before it clears its own storage.
 
-It also serves the review page (marks, alert journal, repeat offenders, map,
+It also hands the board its newest firmware (GET /firmware, built by the
+airwatch-builder container into <data>/firmware/), and serves the review page (marks, alert journal, repeat offenders, map,
 fixed routers, police sightings, export) from an SQLite index of the uploads.
 
 Standard library only. Settings come from environment variables:
@@ -18,6 +19,7 @@ Standard library only. Settings come from environment variables:
 import base64
 import datetime
 import html
+import hashlib
 import hmac
 import json
 import os
@@ -39,6 +41,31 @@ STORE = None
 UPLOAD_LOCK = threading.Lock()   # one upload at a time: file names and all-*.log appends
 MAX_BYTES = 16 * 1024 * 1024
 KINDS = {"marks", "alerts", "samples"}
+FIRMWARE = os.path.join(DATA, "firmware")
+
+
+def firmware_info():
+    """current.json written by the builder, or None. Newest build only."""
+    try:
+        with open(os.path.join(FIRMWARE, "current.json"), encoding="utf-8") as f:
+            info = json.load(f)
+        if info.get("build") and info.get("md5") and int(info.get("size", 0)) > 0:
+            return info
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def firmware_status():
+    """For the review page: the build on offer and the builder's last result."""
+    out = {"current": firmware_info()}
+    for key, name in (("builder", "status.json"), ("board", "board.json")):
+        try:
+            with open(os.path.join(FIRMWARE, name), encoding="utf-8") as f:
+                out[key] = json.load(f)
+        except (OSError, ValueError):
+            out[key] = None
+    return out
 
 
 def log(msg):
@@ -60,18 +87,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def token_ok(self, what):
+        got = self.headers.get("X-AirWatch-Token", "")
+        if TOKEN and hmac.compare_digest(got, TOKEN):
+            return True
+        # Lengths only, never the tokens. A shorter token here usually means
+        # docker compose ate a "$..." part: write $ as $$ in the compose file.
+        log(f"refused {what} from {self.client_address[0]}: bad token "
+            f"(got {len(got)} characters, expected {len(TOKEN)})")
+        self.reply(403, "bad token")
+        return False
+
+    # ---- firmware for the board (newest build only) ----
+    def firmware(self, q):
+        if not self.token_ok("update check"):
+            return
+        info = firmware_info()
+        have = q.get("have", [""])[0][:40]
+        try:   # what the board runs, for the review page
+            os.makedirs(FIRMWARE, exist_ok=True)
+            with open(os.path.join(FIRMWARE, "board.json.tmp"), "w", encoding="utf-8") as f:
+                json.dump({"have": have, "at": datetime.datetime.now().isoformat(timespec="seconds")}, f)
+            os.replace(os.path.join(FIRMWARE, "board.json.tmp"), os.path.join(FIRMWARE, "board.json"))
+        except OSError:
+            pass
+        if not info:
+            return self.reply(404, "no build yet")
+        if have == info["build"]:
+            log(f"update check from {self.client_address[0]}: {have} is current")
+            self.send_response(204)
+            self.end_headers()
+            return
+        with open(os.path.join(FIRMWARE, "current.bin"), "rb") as f:
+            data = f.read()
+        if len(data) != info["size"] or hashlib.md5(data).hexdigest() != info["md5"]:
+            log("firmware: current.bin does not match current.json - not served")
+            return self.reply(503, "build being replaced")
+        log(f"update: sending {info['build']} to {self.client_address[0]} (it has {have or '?'})")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Build", info["build"])
+        self.send_header("X-MD5", info["md5"])
+        self.end_headers()
+        self.wfile.write(data)
+
     # ---- upload from the board ----
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
         if url.path != "/upload":
             return self.reply(404, "not found")
-        got = self.headers.get("X-AirWatch-Token", "")
-        if not TOKEN or not hmac.compare_digest(got, TOKEN):
-            # Lengths only, never the tokens. A shorter token here usually means
-            # docker compose ate a "$..." part: write $ as $$ in the compose file.
-            log(f"refused upload from {self.client_address[0]}: bad token "
-                f"(got {len(got)} characters, expected {len(TOKEN)})")
-            return self.reply(403, "bad token")
+        if not self.token_ok("upload"):
+            return
         q = urllib.parse.parse_qs(url.query)
         kind = q.get("kind", [""])[0]
         drive = re.sub(r"[^0-9]", "", q.get("drive", ["0"])[0])[:10] or "0"
@@ -151,6 +218,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         if url.path == "/healthz":          # before the password: Docker's health check has none
             return self.reply(200, "ok")
+        if url.path == "/firmware":         # the board: token, not the page password
+            return self.firmware(urllib.parse.parse_qs(url.query))
         if not self.authorised():
             return
         q = urllib.parse.parse_qs(url.query)
@@ -159,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
             "api/summary": STORE.summary, "api/marks": STORE.marks, "api/journal": STORE.journal,
             "api/repeat": STORE.repeat, "api/fixed": STORE.fixed, "api/police": STORE.police,
             "api/map": STORE.map, "api/drives": STORE.drives, "api/finder": STORE.finder,
-            "api/drops": STORE.drops,
+            "api/drops": STORE.drops, "api/firmware": firmware_status,
         }
         if rel in ("", "index.html"):
             with open(os.path.join(STATIC, "index.html"), "rb") as f:
@@ -185,6 +254,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", f'attachment; filename="{name}"')
             self.end_headers()
             return self.wfile.write(body)
+        if rel == "firmware/current.bin":   # for the first install by hand (board web page > update)
+            info = firmware_info()
+            if not info:
+                return self.reply(404, "no build yet")
+            with open(os.path.join(FIRMWARE, "current.bin"), "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="airwatch-{info["build"]}.bin"')
+            self.end_headers()
+            return self.wfile.write(data)
         if rel == "files":
             return self.reply(200, self.index(), "text/html; charset=utf-8")
         # the raw uploads (.log files only)

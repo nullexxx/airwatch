@@ -16,3 +16,23 @@ services:
       # AIRWATCH_UI_PASSWORD: "another password"
     volumes:
       - ./data:/data
+
+  # Automatic firmware updates: builds each new firmware commit from GitHub
+  # with your secrets.h and leaves the newest build in ./data/firmware. The
+  # board installs it from the receiver the next time it gets home.
+  # Delete this service to turn automatic updates off.
+  airwatch-builder:
+    # Built by GitHub Actions from builder/. To build it yourself instead,
+    # replace the image line with:  build: ./builder
+    image: ghcr.io/nullexxx/airwatch-builder:latest
+    container_name: airwatch-builder
+    restart: unless-stopped
+    environment:
+      AIRWATCH_INTERVAL_MIN: "30"          # how often to look for new commits
+      # AIRWATCH_REPO: "https://github.com/nullexxx/airwatch.git"
+      # AIRWATCH_BRANCH: "main"
+    volumes:
+      - ./data:/data
+      # Your secrets.h (the same file you flash with). It must exist before
+      # the first start, or Docker makes an empty folder by that name.
+      - ./secrets.h:/secrets/secrets.h:ro

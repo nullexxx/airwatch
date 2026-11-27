@@ -41,4 +41,39 @@ with tempfile.TemporaryDirectory() as d:
     assert "GRTC-MT Wifi" in s.export([7])
     assert s.drops() == [{"drive": 7, "drops": 1, "ble_drops": 0, "obs_dropped": 2}]
     assert any(c["value"] == "govt" for c in s.finder()["candidates"])
+
+# The firmware endpoint, over real HTTP: 404 before any build, the image to
+# an older board, 204 to a current one, 403 without the token.
+import hashlib, json, threading, urllib.error, urllib.request
+with tempfile.TemporaryDirectory() as d:
+    os.environ.update(AIRWATCH_DATA=d, AIRWATCH_TOKEN="t0ken")
+    import receiver
+    receiver.STORE = Store(d, Vendors(d, log=lambda *a: None), log=lambda *a: None)
+    srv = receiver.ThreadingHTTPServer(("127.0.0.1", 0), receiver.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+
+    def get(path, token="t0ken"):
+        req = urllib.request.Request(base + path, headers={"X-AirWatch-Token": token})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read(), r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(), e.headers
+
+    assert get("/firmware?have=dev")[0] == 404
+    image = b"\xe9" + os.urandom(5000)
+    os.makedirs(os.path.join(d, "firmware"), exist_ok=True)
+    with open(os.path.join(d, "firmware", "current.bin"), "wb") as f:
+        f.write(image)
+    with open(os.path.join(d, "firmware", "current.json"), "w") as f:
+        json.dump({"build": "abc1234.beef", "md5": hashlib.md5(image).hexdigest(), "size": len(image)}, f)
+    code, body, h = get("/firmware?have=dev")
+    assert code == 200 and body == image and h["X-Build"] == "abc1234.beef" and h["X-MD5"] == hashlib.md5(image).hexdigest()
+    assert get("/firmware?have=abc1234.beef")[0] == 204
+    assert get("/firmware?have=dev", token="nope")[0] == 403
+    fw = json.loads(get("/api/firmware")[1])
+    assert fw["current"]["build"] == "abc1234.beef" and fw["board"]["have"] == "abc1234.beef"
+    assert get("/firmware/current.bin")[1] == image
+    srv.shutdown()
 print("smoke test ok")

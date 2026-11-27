@@ -36,7 +36,8 @@
  *   single tick        new ECHO / MINOR target (traffic addressed to a LOW
  *                      prefix, or a drone: Remote ID broadcast or Skydio)
  *   tick-tick ...      heartbeat while a HIGH target is in range
- *   tick ...           heartbeat while a LOW target is in range
+ *                      (LOW targets only beep once when they appear;
+ *                      set HEARTBEAT_MIN_TIER = TIER_LOW for their ticks)
  *                      heartbeat rate = proximity: ~2 s apart when weak,
  *                      ~4 per second when strong
  *   (silence)          nothing in range; it only beeps for a target
@@ -128,10 +129,16 @@
  *   within 20 s, after MAINT_IDLE_MS (15 min) without a page request, or when
  *   you press Exit on the page. With the GPS showing you driving it does not
  *   enter home mode at all.
- *   After any of these (or a crash) it will not open the page again by
- *   itself until it has not heard your home network for HOME_RELEASE_MS
- *   (5 min), i.e. you drove away and came back. A power cycle also re-arms
- *   it.
+ *   After Exit, an idle timeout or a crash it will not open the page again
+ *   by itself until it has not heard your home network for HOME_RELEASE_MS
+ *   (1 min), i.e. you drove away and came back. After driving away it also
+ *   re-arms when home is strong (-75 dBm) and steady for 10 s, or heard
+ *   without a break for 2 min, while not driving (you pulled in after all). A join that failed is retried while
+ *   parked: 20 s, 40 s, 80 s ... up to every 5 min. A power cycle re-arms it.
+ *   It joins the strongest home access point it just heard directly (no
+ *   all-channel scan); if that has not worked in 6 s it scans every channel.
+ *   A MAYBE alert never holds it back; a POLICE one does only while moving
+ *   (at most 2 min).
  *   With UPLOAD_URL / UPLOAD_TOKEN in secrets.h it first sends the mark log
  *   and alert journal to the receiver in server/ and clears them once the
  *   receiver confirms an identical copy (README: Sending logs home).
@@ -224,6 +231,14 @@
 #if __has_include("secrets.h")
   #include "secrets.h"
 #endif
+// Build name: the log server's builder writes build_id.h (the git commit it
+// built); a build from the Arduino IDE is "dev".
+#if __has_include("build_id.h")
+  #include "build_id.h"
+#endif
+#ifndef AIRWATCH_BUILD
+  #define AIRWATCH_BUILD "dev"
+#endif
 #if defined(WEB_USER) && defined(WEB_PASSWORD)
   #define WEB_UI 1          // web page: road access always, home mode if below
 #else
@@ -287,6 +302,16 @@
   #endif
 #else
   #define AUTO_UPLOAD 0
+#endif
+// Automatic updates: after uploading, ask the same server for its newest
+// build and install it if it differs from this one. AUTO_UPDATE 0 in
+// secrets.h turns it off (e.g. while testing your own builds).
+#ifndef AUTO_UPDATE
+  #define AUTO_UPDATE 1
+#endif
+#if !AUTO_UPLOAD
+  #undef AUTO_UPDATE
+  #define AUTO_UPDATE 0
 #endif
 
 // ============================================================
@@ -459,13 +484,21 @@ constexpr size_t   JOURNAL_FILE_MAX           = 128 * 1024;
 constexpr uint32_t HOME_SETTLE_MS             = 3000;    // home heard this long before joining
 constexpr uint32_t HOME_GAP_MS                = 15000;   // silent this long = no longer "at home"
 constexpr int8_t   HOME_MIN_RSSI              = -85;     // ignore it when this faint
-constexpr uint32_t HOME_RELEASE_MS            = 5UL * 60UL * 1000UL;  // away this long re-arms it
+constexpr uint32_t HOME_RELEASE_MS            = 60000;   // away this long re-arms it (a short errand is enough)
 constexpr uint32_t MAINT_JOIN_TIMEOUT_MS      = 20000;   // could not join in this long: give up
+constexpr uint32_t MAINT_FAST_JOIN_MS         = 6000;    // direct join to the strongest AP; then scan all channels
+constexpr uint32_t MAINT_RETRY_FIRST_MS       = 20000;   // after a failed join, try again this soon ...
+constexpr uint32_t MAINT_RETRY_MAX_MS         = 5UL * 60UL * 1000UL;  // ... doubling up to this
 constexpr uint32_t MAINT_RECOVER_MS           = 10000;   // link must be back this long to cancel leaving
 constexpr float    HOME_DRIVING_MPH           = 10.0f;   // GPS: at least this fast ...
 constexpr uint32_t HOME_DRIVING_MS            = 3000;    // ... for this long = driving: not at home
 constexpr uint32_t MAINT_LOST_MS              = 5000;    // home network gone / very weak this long: leave
 constexpr int      HOME_LEAVE_RSSI            = -88;     // this weak counts as gone (driving away)
+constexpr int8_t   HOME_PARKED_RSSI           = -75;     // a drive-away lock clears when home is this strong ...
+constexpr uint32_t HOME_PARKED_MS             = 10000;   // ... for this long, not driving (parked after all)
+constexpr uint32_t HOME_STEADY_MS             = 120000;  // home heard this long without a break: parked, whatever
+                                                         // the strength (clears a drive-away lock, ends an alert hold)
+constexpr float    HOME_STOPPED_MPH           = 3.0f;    // GPS: slower than this = stopped (alerts do not delay home mode)
 constexpr uint32_t ROAD_WINDOW_MS             = 15000;   // road access: hold the button within this of power-up
 constexpr uint32_t ROAD_HOLD_MS               = 3000;    // ...for this long
 constexpr uint32_t MAINT_IDLE_MS              = 15UL * 60UL * 1000UL; // no page request this long: leave
@@ -508,8 +541,9 @@ enum AlertTier : uint8_t {
   TIER_HIGH = 3    // transmitted a HIGH signature
 };
 
-// Heartbeat applies to this tier and above (ECHO gets its one tick only).
-constexpr uint8_t HEARTBEAT_MIN_TIER = TIER_LOW;
+// Heartbeat applies to this tier and above. POLICE only: MAYBE and MINOR
+// get their announce beeps and then stay silent (the LED still shows them).
+constexpr uint8_t HEARTBEAT_MIN_TIER = TIER_HIGH;
 
 enum LabelRank : uint8_t {
   LABEL_RANK_NONE      = 0,
@@ -770,6 +804,14 @@ constexpr size_t NUM_IGNORED_SSID_TARGETS = sizeof(ignoredSsidTargets) / sizeof(
 const uint8_t quietMacTargets[][6] = {
   {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
   {0x00, 0x30, 0x44, 0x3E, 0x00, 0x34},   // hidden Cradlepoint, same spot drives 94 + 95, marked "nothing" twice
+  {0x00, 0x30, 0x44, 0x57, 0xBE, 0x48},   // "IBR900-e47", same highway spot drives 91 + 95
+  {0x00, 0x30, 0x44, 0x5F, 0x38, 0x04},   // "dp_POC" Cradlepoint, same spot drives 89 + 91
+  {0xA8, 0xC0, 0xEA, 0x8E, 0xE3, 0x20},   // Pepwave, echo only, same spot drives 91 + 95
+  {0xA8, 0xC0, 0xEA, 0x8E, 0xE3, 0x24},   //   ...its other radio
+  {0xD4, 0x13, 0xF8, 0x43, 0xF0, 0xA8},   // Peplink "5Z36J", business by the drive 95 stop, marked "nothing"
+  {0xD4, 0x13, 0xF8, 0x80, 0x08, 0x49},   // Peplink, same business
+  {0x00, 0x30, 0x44, 0xDD, 0xDE, 0x04},   // Cradlepoint "TL_SDC_private", same business
+  {0xCC, 0x93, 0x4A, 0x1E, 0x72, 0xA6},   // Sierra Wireless, echo only, same business
 };
 constexpr size_t NUM_QUIET_MAC_TARGETS = sizeof(quietMacTargets) / sizeof(quietMacTargets[0]);
 
@@ -1276,16 +1318,30 @@ bool     bleReady                  = false;
 // Home Wi-Fi maintenance mode
 volatile uint32_t homeBeaconCount  = 0;     // written by the Wi-Fi task
 volatile int8_t   homeBeaconRssi   = 0;
+// Strongest home access point heard lately (Wi-Fi task writes, loop reads):
+// joining it directly skips the all-channel scan.
+volatile uint8_t  homeBestBssid[6] = {};
+volatile uint8_t  homeBestChannel  = 0;
+volatile int8_t   homeBestRssi     = -127;
+volatile uint32_t homeBestAt       = 0;
+bool     maintFastJoin             = false; // this join went straight to homeBestBssid
 bool     maintActive               = false; // web mode: home Wi-Fi joined/joining, or road network up
 bool     maintRoad                 = false; // web mode is the road network (own access point)
 bool     maintConnected            = false;
 uint32_t maintStartedAt            = 0;
 uint32_t maintLastRequestAt        = 0;
 bool     homeLocked                = false; // stay out until away from home a while
+bool     homeLockLeave             = false; // ...a drive-away lock: strong steady home Wi-Fi also clears it
 // Survives a software reboot (not a power cut): set when we reboot out of
 // maintenance on purpose, so it does not re-enter while still parked at home.
 RTC_NOINIT_ATTR uint32_t maintLockMagic;
 constexpr uint32_t MAINT_LOCK_MAGIC = 0xA17E5EEDUL;
+constexpr uint32_t MAINT_LEAVE_MAGIC = 0xA17E1EA5UL;
+// A join that failed is not "you left": retry while parked, backing off.
+RTC_NOINIT_ATTR uint32_t maintRetryMagic;
+RTC_NOINIT_ATTR uint32_t maintRetryCount;
+constexpr uint32_t MAINT_RETRY_MAGIC = 0x5E77A1A1UL;
+uint32_t homeRetryAt               = 0;     // after a failed join: not before this (millis)
 // Set while the web page is up, so a crash there is recognised on reboot.
 RTC_NOINIT_ATTR uint32_t webActiveMagic;
 constexpr uint32_t WEB_ACTIVE_MAGIC = 0x3EBACE00UL;
@@ -2801,7 +2857,9 @@ static void showNotice(const char* line1, const char* line2, uint32_t now) {
 static void maintEnter(uint32_t now, const char* why);
 #endif
 #if WEB_UI
-static void maintExit(const char* why, bool lock);
+// How maintenance ends: what the next boot may do by itself.
+enum : uint8_t { MAINT_EXIT_FREE = 0, MAINT_EXIT_LOCK = 1, MAINT_EXIT_LEAVE = 2, MAINT_EXIT_RETRY = 3 };
+static void maintExit(const char* why, uint8_t how);
 static void roadEnter(uint32_t now);
 #endif
 static void printResetLog();
@@ -3514,6 +3572,16 @@ void wifi_promiscuous_handler(void* buf, wifi_promiscuous_pkt_type_t type) {
         if (bssidOk) {
           homeBeaconRssi = header.rssi;
           bump(homeBeaconCount);
+          // Keep the strongest; forget it after 5 s so a fading one is replaced.
+          // The hop channel can hear a neighbour channel faintly, but the
+          // strongest copy is on the real one (and the join falls back anyway).
+          const uint32_t t = millis();
+          if (header.rssi > homeBestRssi || (t - homeBestAt) > 5000UL) {
+            memcpy(const_cast<uint8_t*>(homeBestBssid), header.addr2, 6);
+            homeBestChannel = header.channel;
+            homeBestRssi    = header.rssi;
+            homeBestAt      = t;
+          }
         }
       }
 #endif
@@ -3601,6 +3669,7 @@ static void reportEcho(const uint8_t mac[6], const MacPrefixTarget* prefixMatch,
     s.reasons |= REASON_PREFIX_LOW;
   }
   if (event.frameType == WIFI_PKT_DATA) s.reasons |= REASON_DATA_FRAME;
+  s.quiet = isQuietMac(mac);   // a reviewed fixed router: silent here too
   considerLabel(s, prefixMatch->label, LABEL_RANK_ECHO);
   noteSighting(s, now);
 }
@@ -4513,7 +4582,7 @@ static void runCommand(const char* cmd, bool fromWeb) {
   } else if (strcasecmp(cmd, "a") == 0) {
     if (!maintActive) roadEnter(millis());
   } else if (strcasecmp(cmd, "x") == 0) {
-    if (maintActive) maintExit("command", true);
+    if (maintActive) maintExit("command", MAINT_EXIT_LOCK);
 #endif
   } else if (strcasecmp(cmd, "r") == 0) {
     printResetLog();
@@ -4639,7 +4708,7 @@ static void outputDiagnostics(uint32_t now) {
   Console.printf("Home Wi-Fi: %s | beacons %lu, last %d dBm%s\n",
                 maintActive ? (maintRoad ? "road network up" : maintConnected ? "joined, web page up" : "joining") : "listening",
                 static_cast<unsigned long>(homeBeaconCount), static_cast<int>(homeBeaconRssi),
-                homeLocked ? " | locked until away 5 min" : "");
+                homeLocked ? " | locked until away 1 min" : "");
 #endif
 #if ENABLE_GPS
   if (!gpsSeen(now)) {
@@ -4782,7 +4851,7 @@ th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertic
  <div class="card" style="margin-top:10px"><h3 style="margin-top:0">Alert journal and GPS</h3>
  <p class="msg" style="margin:0">Every alert is saved on its own when it ends (Marks → Alert journal), no button needed. It keeps about 1,400 alerts and drops the oldest. With a GPS on D7, marks and alerts get the real time and a map link; each alert's map point is where its signal was strongest.</p></div>
  <div class="card" style="margin-top:10px"><h3 style="margin-top:0">Web page</h3>
- <p class="msg" style="margin:0">At home it opens by itself after your Wi-Fi has been in view for a few seconds: http://airwatch.local or the address on the screen. It goes back to listening about 5 s after you drive out of range (at once if the GPS shows you driving), if joining fails for 20 s, on Exit, or after 15 min idle. After that it stays out of home mode until you have been away 5 min, or the power is cycled. Console commands: h help · t telemetry (includes GPS) · r restart / crash history · d devices · s signature hits · m mute · led LED test · 1/2/3 dwell · x leave.</p></div>
+ <p class="msg" style="margin:0">At home it opens by itself after your Wi-Fi has been in view for a few seconds: http://airwatch.local or the address on the screen. It goes back to listening about 5 s after you drive out of range (at once if the GPS shows you driving), on Exit, or after 15 min idle; after that it stays out of home mode until you have been away 1 min, or the power is cycled. A failed join is retried while parked. Console commands: h help · t telemetry (includes GPS) · r restart / crash history · d devices · s signature hits · m mute · led LED test · 1/2/3 dwell · x leave.</p></div>
 </section>
 <section id="fw">
  <div class="card"><div class="k">Running build</div><div class="v" id="build">…</div></div>
@@ -5064,7 +5133,7 @@ static void webStatus() {
   if (clockValid()) { char t[24]; isoTime(t, sizeof(t), time(nullptr)); jsonStr(j, t); } else j += "null";
   j += ",\"homeRssi\":"; j += maintRoad ? 0 : static_cast<int>(WiFi.RSSI());
   j += ",\"ip\":"; jsonStr(j, (maintRoad ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str());
-  j += ",\"build\":"; jsonStr(j, __DATE__ " " __TIME__);
+  j += ",\"build\":"; jsonStr(j, AIRWATCH_BUILD " (" __DATE__ " " __TIME__ ")");
   j += ",\"drive\":"; j += bootCount;
   j += ",\"marks\":"; j += static_cast<int>(markCount);
   j += ",\"logPct\":"; j += static_cast<int>(markLogPercent);
@@ -5396,7 +5465,7 @@ static void maintStartServices() {
     if (!webAuth()) return;
     webServer.send(200, "text/plain", "OK");
     delay(300);
-    maintExit("web page", true);
+    maintExit("web page", MAINT_EXIT_LOCK);
   });
   webServer.on("/reboot", HTTP_POST, []() {
     if (!webAuth()) return;
@@ -5423,10 +5492,21 @@ static void maintStartServices() {
 
 // Leaving is a reboot: the cleanest way back to a sniffer that is exactly
 // as it was at power-on. lock = do not come back until away from home.
-static void maintExit(const char* why, bool lock) {
+// LOCK  (Exit, idle, command): not again until away HOME_RELEASE_MS.
+// LEAVE (drove off): the same, or sooner once home is strong and steady again.
+// RETRY (join failed): try again while parked, 20 s, 40 s, 80 s ... 5 min.
+static void maintExit(const char* why, uint8_t how) {
   Console.printf("[WEB] leaving web mode (%s), rebooting into listening\n", why);
   webActiveMagic = 0;
-  if (lock) maintLockMagic = MAINT_LOCK_MAGIC;
+  maintLockMagic = (how == MAINT_EXIT_LOCK) ? MAINT_LOCK_MAGIC
+                 : (how == MAINT_EXIT_LEAVE) ? MAINT_LEAVE_MAGIC : 0;
+  if (how == MAINT_EXIT_RETRY) {
+    if (maintRetryMagic != MAINT_RETRY_MAGIC) maintRetryCount = 0;
+    maintRetryMagic = MAINT_RETRY_MAGIC;
+    if (maintRetryCount < 16) ++maintRetryCount;
+  } else {
+    maintRetryMagic = 0;
+  }
   delay(100);
 #if ENABLE_MARK_LOG
   journalFlushOngoing();
@@ -5475,7 +5555,20 @@ static void maintEnter(uint32_t now, const char* why) {
   WiFi.setTxPower(WEB_TX_POWER_HOME);
   esp_wifi_set_inactive_time(WIFI_IF_STA, 3);   // notice a vanished router in 3 s, not ~6
   maintRegisterEvents();
-  WiFi.begin(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
+  // Straight to the strongest access point just heard: no all-channel scan.
+  // Falls back to a full scan after MAINT_FAST_JOIN_MS (maintTick).
+  uint8_t bssid[6];
+  memcpy(bssid, const_cast<const uint8_t*>(homeBestBssid), 6);
+  const uint8_t ch = homeBestChannel;
+  maintFastJoin = (ch >= 1 && ch <= 14 && (millis() - homeBestAt) < 10000UL);
+  if (maintFastJoin) {
+    Console.printf("[HOME] fast join: %02X:%02X:%02X:%02X:%02X:%02X on channel %u (%d dBm)\n",
+                   bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+                   static_cast<unsigned>(ch), static_cast<int>(homeBestRssi));
+    WiFi.begin(HOME_WIFI_SSID, HOME_WIFI_PASSWORD, ch, bssid);
+  } else {
+    WiFi.begin(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
+  }
   maintActive        = true;
   maintRoad          = false;
   maintConnected     = false;
@@ -5634,6 +5727,72 @@ static void uploadOnArrival(uint32_t now) {
   if (!ok) audioPlay(JINGLE_MARK_NOTHING, sizeof(JINGLE_MARK_NOTHING) / sizeof(Note),
                      AUDIO_PRIO_BOOT, millis());   // two long beeps: not sent, still on the board
 }
+
+#if AUTO_UPDATE
+// Asks <server>/firmware for the newest build. 204 = this one is current.
+// 200 = a different build: it streams straight into the spare app slot,
+// is checked against the MD5 the server sent, and the board reboots into
+// it. Any failure leaves this firmware running untouched.
+static void checkForUpdate(uint32_t now) {
+  String url = UPLOAD_URL;
+  const int cut = url.lastIndexOf("/upload");
+  if (cut > 0) url = url.substring(0, cut);
+  url += "/firmware?have=";
+  url += AIRWATCH_BUILD;
+  HTTPClient http;
+  http.setTimeout(20000);
+  if (!http.begin(url)) return;
+  http.addHeader("X-AirWatch-Token", UPLOAD_TOKEN);
+  const char* keys[] = {"X-Build", "X-MD5"};
+  http.collectHeaders(keys, 2);
+  const int code = http.GET();
+  if (code == 204) {
+    Console.printf("[UPDATE] firmware %s is the newest\n", AIRWATCH_BUILD);
+    http.end();
+    return;
+  }
+  if (code != 200) {
+    if (code != 404) Console.printf("[UPDATE] no update check (HTTP %d)\n", code);   // 404: no build yet
+    http.end();
+    return;
+  }
+  const int len = http.getSize();
+  const String build = http.header("X-Build");
+  const String md5 = http.header("X-MD5");
+  if (len <= 0 || md5.length() != 32 || build.length() == 0) {
+    Console.println(F("[UPDATE] server reply incomplete - skipped"));
+    http.end();
+    return;
+  }
+  Console.printf("[UPDATE] installing %s over %s (%d bytes)\n", build.c_str(), AIRWATCH_BUILD, len);
+  showNotice("UPDATING", build.c_str(), now);
+  refreshDisplay(true);
+  uploadPause();
+  bool ok = Update.begin(static_cast<size_t>(len), U_FLASH);
+  if (ok) {
+    Update.setMD5(md5.c_str());
+    const size_t wrote = Update.writeStream(*http.getStreamPtr());
+    ok = (wrote == static_cast<size_t>(len)) && Update.end();
+  }
+  http.end();
+  if (!ok) {
+    Update.printError(Console);
+    Update.abort();
+    uploadResume();
+    showNotice("UPDATE FAIL", "kept old firmware", millis());
+    return;
+  }
+  Console.printf("[UPDATE] %s installed, rebooting\n", build.c_str());
+  showNotice("UPDATED", build.c_str(), millis());
+  refreshDisplay(true);
+  webActiveMagic = 0;
+  delay(800);
+#if ENABLE_MARK_LOG
+  journalFlushOngoing();
+#endif
+  ESP.restart();   // not locked: still at home, it rejoins (and finds it is current)
+}
+#endif  // AUTO_UPDATE
 #endif  // AUTO_UPLOAD
 
 // Runs every loop() while a web mode is up.
@@ -5653,11 +5812,13 @@ static void maintTick(uint32_t now) {
     // GPS says we are driving: leave at once, joined or still joining.
     if (homeDriving(now)) {
       Console.println(F("[HOME] GPS shows driving: back to listening"));
-      maintExit("driving away", true);
+      maintExit("driving away", MAINT_EXIT_LEAVE);
     }
     if (!maintConnected) {
       if (up) {
         maintConnected     = true;
+        maintRetryMagic    = 0;                   // joined: no more back-off
+        maintRetryCount    = 0;
         maintLastRequestAt = now;
         lostMs             = 0;
         goodSince          = now;
@@ -5672,10 +5833,18 @@ static void maintTick(uint32_t now) {
         lastRenderedState = DisplaySnapshot{};
 #if AUTO_UPLOAD
         uploadOnArrival(now);
+#if AUTO_UPDATE
+        checkForUpdate(millis());
+#endif
         maintLastRequestAt = millis();
 #endif
+      } else if (maintFastJoin && (now - maintStartedAt) >= MAINT_FAST_JOIN_MS) {
+        maintFastJoin = false;                    // that AP did not take us: scan every channel
+        Console.println(F("[HOME] fast join did not connect: scanning all channels"));
+        WiFi.disconnect(false, false);
+        WiFi.begin(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
       } else if ((now - maintStartedAt) >= MAINT_JOIN_TIMEOUT_MS) {
-        maintExit("could not join home Wi-Fi in 20 s (out of range, or check secrets.h)", true);
+        maintExit("could not join home Wi-Fi in 20 s (out of range, or check secrets.h) - will retry", MAINT_EXIT_RETRY);
       }
       return;
     }
@@ -5690,7 +5859,7 @@ static void maintTick(uint32_t now) {
       lostMs += step;
       if (lostMs >= MAINT_LOST_MS) {
         Console.printf("[HOME] home Wi-Fi %s: back to listening\n", up ? "very weak" : "gone");
-        maintExit("home Wi-Fi out of reach", true);
+        maintExit("home Wi-Fi out of reach", MAINT_EXIT_LEAVE);
       }
     } else {
       if (goodSince == 0) goodSince = now;
@@ -5703,7 +5872,7 @@ static void maintTick(uint32_t now) {
   ArduinoOTA.handle();
   // Fresh millis(): handleClient() above may just have moved maintLastRequestAt
   // past `now`, and an unsigned now - later underflows to ~4 billion ms.
-  if (timeReached(millis(), maintLastRequestAt + MAINT_IDLE_MS)) maintExit("idle timeout", true);
+  if (timeReached(millis(), maintLastRequestAt + MAINT_IDLE_MS)) maintExit("idle timeout", MAINT_EXIT_LOCK);
 }
 
 #endif  // WEB_UI
@@ -5730,13 +5899,34 @@ static void homeTick(uint32_t now) {
 
   if (homeLocked) {
     const uint32_t away = haveSeen ? (now - lastSeen) : now;   // since boot if never heard
+    // A drive-away lock that was wrong (you pulled in after all, at the edge
+    // of range): home strong and steady while not driving clears it too.
+    static uint32_t strongSince = 0;
+    const bool strong = streak && homeBeaconRssi >= HOME_PARKED_RSSI && !homeDriving(now);
+    if (!strong) strongSince = 0;
+    else if (strongSince == 0) strongSince = now;
     if (away >= HOME_RELEASE_MS) {
       homeLocked = false;
       Console.println(F("[HOME] away from home long enough: maintenance mode re-armed"));
+    } else if (homeLockLeave && ((strongSince != 0 && (now - strongSince) >= HOME_PARKED_MS) ||
+                                 (streak && (now - streakStart) >= HOME_STEADY_MS && !homeDriving(now)))) {
+      homeLocked = false;
+      Console.println(F("[HOME] home Wi-Fi strong and steady: parked at home, re-armed"));
+    } else {
+      return;
     }
-    return;
   }
-  if (streak && (now - streakStart) >= HOME_SETTLE_MS && !alertView.active && !homeDriving(now)) {
+  if (homeRetryAt != 0) {                // a join failed: wait a little before the next try
+    if (!timeReached(now, homeRetryAt)) return;
+    homeRetryAt = 0;
+  }
+  // Only a POLICE alert while moving holds home mode back (it would stop Wi-Fi
+  // listening mid-encounter). MAYBE, quiet routers, or anything once the GPS
+  // shows you stopped do not: they used to keep it from joining for minutes.
+  const bool stopped = gpsFixFresh(now) && gps.speedMph < HOME_STOPPED_MPH;
+  const bool holdForAlert = alertView.active && alertView.tier == TIER_HIGH && !alertView.quiet && !stopped &&
+                            (now - streakStart) < HOME_STEADY_MS;   // not forever: a neighbour's gear
+  if (streak && (now - streakStart) >= HOME_SETTLE_MS && !holdForAlert && !homeDriving(now)) {
     maintEnter(now, "home Wi-Fi in view");
   }
 }
@@ -6013,13 +6203,30 @@ void setup() {
   // Locked = do not open the page by itself until away from home 5 min:
   // after Exit / idle timeout / failed join, and after a crash in web mode
   // (so a crash there cannot turn into a reboot loop in the driveway).
-  homeLocked = ((maintLockMagic == MAINT_LOCK_MAGIC) && (esp_reset_reason() == ESP_RST_SW)) || crashedInWeb;
-  maintLockMagic = 0;
+  {
+    const bool sw = (esp_reset_reason() == ESP_RST_SW);
+    homeLockLeave = sw && (maintLockMagic == MAINT_LEAVE_MAGIC) && !crashedInWeb;
+    homeLocked    = (sw && (maintLockMagic == MAINT_LOCK_MAGIC)) || homeLockLeave || crashedInWeb;
+    maintLockMagic = 0;
+    if (sw && maintRetryMagic == MAINT_RETRY_MAGIC && !homeLocked) {
+      const uint8_t n = static_cast<uint8_t>(std::min<uint32_t>(maintRetryCount, 5));
+      const uint32_t wait = std::min<uint32_t>(MAINT_RETRY_FIRST_MS << (n ? n - 1 : 0), MAINT_RETRY_MAX_MS);
+      homeRetryAt = millis() + wait;
+      Console.printf("[INIT] last home Wi-Fi join failed: trying again in %lu s\n",
+                     static_cast<unsigned long>(wait / 1000UL));
+    } else {
+      maintRetryMagic = 0;               // power cut or a clean start: no back-off
+      maintRetryCount = 0;
+    }
+  }
   Console.printf("[INIT] Home Wi-Fi maintenance: \"%s\"%s\n", HOME_WIFI_SSID,
-                homeLocked ? " (locked until away from home 5 min)" : "");
+                homeLocked ? (homeLockLeave ? " (drove off: re-arms after 1 min away, or when parked at home)"
+                                            : " (locked until away from home 1 min)") : "");
 #else
   Console.println(F("[INIT] Home Wi-Fi maintenance: off (no secrets.h)"));
 #endif
+  Console.printf("[INIT] Firmware build %s (compiled %s %s)%s\n", AIRWATCH_BUILD, __DATE__, __TIME__,
+                AUTO_UPDATE ? ", updates itself from the log server" : "");
   Console.println(F("\n[INIT] Passive monitor operational"));
   Console.printf("[INIT] Signatures: %u prefixes, %u SSIDs (%u ignored), %u WPS, %u BLE\n",
                 static_cast<unsigned>(NUM_PREFIX_TARGETS),

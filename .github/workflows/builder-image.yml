@@ -1,0 +1,50 @@
+# Builds the firmware builder (server/builder/) and publishes it as
+# ghcr.io/<owner>/airwatch-builder. It holds only the public ESP32 toolchain:
+# your secrets.h is mounted when the container runs, and firmware is built on
+# your own server, never here.
+name: Builder image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/builder/**"
+      - ".github/workflows/builder-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the script
+        run: python3 -m py_compile server/builder/builder.py
+
+      - uses: docker/setup-qemu-action@v3      # lets it build for ARM (Raspberry Pi) too
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/airwatch-builder
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./server/builder
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -17,3 +17,6 @@ build/
 .vscode/
 .idea/
 .DS_Store
+
+# Written by the log server builder
+airwatch_v2/build_id.h

@@ -35,3 +35,7 @@
 // token as its AIRWATCH_TOKEN. Delete these lines to turn it off.
 // #define UPLOAD_URL       "http://192.168.1.50:8077/upload"
 // #define UPLOAD_TOKEN     "a long random string"
+// With the airwatch-builder container running too, the board also installs
+// the newest firmware from the same server on arrival. To stop that (e.g.
+// while testing your own builds), uncomment:
+// #define AUTO_UPDATE      0

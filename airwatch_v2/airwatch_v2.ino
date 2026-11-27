@@ -515,10 +515,11 @@ enum LabelRank : uint8_t {
   LABEL_RANK_NONE      = 0,
   LABEL_RANK_ECHO      = 1, // secondary match (address seen as receiver)
   LABEL_RANK_LOW       = 2, // any low-confidence signature
-  LABEL_RANK_HIGH_PRF  = 3, // high-confidence MAC prefix (hardware OUI)
-  LABEL_RANK_HIGH_WPS  = 4, // high-confidence WPS descriptor
-  LABEL_RANK_HIGH_BLE  = 5, // high-confidence BLE company ID / service / name
-  LABEL_RANK_HIGH_SSID = 6  // high-confidence SSID (explicit network name)
+  LABEL_RANK_LOW_NAME  = 3, // low-confidence network / WPS name: more specific than a vendor
+  LABEL_RANK_HIGH_PRF  = 4, // high-confidence MAC prefix (hardware OUI)
+  LABEL_RANK_HIGH_WPS  = 5, // high-confidence WPS descriptor
+  LABEL_RANK_HIGH_BLE  = 6, // high-confidence BLE company ID / service / name
+  LABEL_RANK_HIGH_SSID = 7  // high-confidence SSID (explicit network name)
 };
 
 enum ReasonCode : uint16_t {
@@ -768,6 +769,7 @@ constexpr size_t NUM_IGNORED_SSID_TARGETS = sizeof(ignoredSsidTargets) / sizeof(
 // signature on one still alerts. The all-zero row is a placeholder.
 const uint8_t quietMacTargets[][6] = {
   {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+  {0x00, 0x30, 0x44, 0x3E, 0x00, 0x34},   // hidden Cradlepoint, same spot drives 94 + 95, marked "nothing" twice
 };
 constexpr size_t NUM_QUIET_MAC_TARGETS = sizeof(quietMacTargets) / sizeof(quietMacTargets[0]);
 
@@ -3721,7 +3723,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
       } else {
         low = true;
         s.reasons |= REASON_SSID_LOW;
-        considerLabel(s, ssidMatch->label, LABEL_RANK_LOW);
+        considerLabel(s, ssidMatch->label, LABEL_RANK_LOW_NAME);   // "GRTC/Henrico unit" beats "Cradlepoint GW"
       }
       if (event.frameType == WIFI_PKT_MGMT && event.subtype == 0x04) {
         s.reasons |= REASON_DIRECTED_PROBE;   // a client asking for a target network
@@ -3735,7 +3737,7 @@ static void evaluateAddressEvidence(const HeaderEvent& event,
       } else {
         low = true;
         s.reasons |= REASON_WPS_LOW;
-        considerLabel(s, wpsMatch->label, LABEL_RANK_LOW);
+        considerLabel(s, wpsMatch->label, LABEL_RANK_LOW_NAME);
       }
     }
     if (isWildcardProbe && prefixMatch2)  s.reasons |= REASON_WILDCARD_PROBE;

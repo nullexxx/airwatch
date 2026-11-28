@@ -32,6 +32,8 @@ services:
       # AIRWATCH_REPO: "https://github.com/nullexxx/airwatch.git"
       # AIRWATCH_BRANCH: "main"
     volumes:
+      # Must be the SAME folder as the receiver's /data above, or the
+      # receiver never sees the builds.
       - ./data:/data
       # Your secrets.h (the same file you flash with). It must exist before
       # the first start, or Docker makes an empty folder by that name.

@@ -14,8 +14,12 @@ services:
       AIRWATCH_TOKEN: "change-me-to-a-long-random-string"
       # Optional: password for the review page (any user name works).
       # AIRWATCH_UI_PASSWORD: "another password"
+      # If ./data is on NFS or SMB: keep the database on local disk instead
+      # (uncomment this and the airwatch-db lines below).
+      # AIRWATCH_DB: "/db/airwatch.db"
     volumes:
       - ./data:/data
+      # - airwatch-db:/db
 
   # Automatic firmware updates: builds each new firmware commit from GitHub
   # with your secrets.h and leaves the newest build in ./data/firmware. The
@@ -38,3 +42,6 @@ services:
       # Your secrets.h (the same file you flash with). It must exist before
       # the first start, or Docker makes an empty folder by that name.
       - ./secrets.h:/secrets/secrets.h:ro
+
+# volumes:
+#   airwatch-db:

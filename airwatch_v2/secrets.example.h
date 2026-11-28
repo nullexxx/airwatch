@@ -39,3 +39,9 @@
 // the newest firmware from the same server on arrival. To stop that (e.g.
 // while testing your own builds), uncomment:
 // #define AUTO_UPDATE      0
+
+// Optional: fixed routers you have reviewed (log server, Fixed routers tab,
+// copy button). Silent but still logged - only within 300 m of the spot, with
+// a GPS fix. Separate entries with ';'. Kept here, not in the public sketch,
+// because the spots show where you drive and park.
+// #define QUIET_ROUTERS    "00:30:44:12:34:56@37.12345,-77.12345; D4:13:F8:12:34:56@37.2,-77.3"

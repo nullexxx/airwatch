@@ -797,23 +797,23 @@ constexpr size_t NUM_IGNORED_SSID_TARGETS = sizeof(ignoredSsidTargets) / sizeof(
 // These are the E-series branch / office models; vehicle models (IBR900,
 // IBR1700, R1900 ...) are deliberately not listed. To alert normally on one
 // of these again, delete its line.
-// Fixed routers you have reviewed (the log server's Fixed routers tab has a
-// copy button for each): treated like quiet-list names, i.e. silent but
-// still logged, along with their sibling radios. A police-specific (HIGH)
-// signature on one still alerts. The all-zero row is a placeholder.
-const uint8_t quietMacTargets[][6] = {
-  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-  {0x00, 0x30, 0x44, 0x3E, 0x00, 0x34},   // hidden Cradlepoint, same spot drives 94 + 95, marked "nothing" twice
-  {0x00, 0x30, 0x44, 0x57, 0xBE, 0x48},   // "IBR900-e47", same highway spot drives 91 + 95
-  {0x00, 0x30, 0x44, 0x5F, 0x38, 0x04},   // "dp_POC" Cradlepoint, same spot drives 89 + 91
-  {0xA8, 0xC0, 0xEA, 0x8E, 0xE3, 0x20},   // Pepwave, echo only, same spot drives 91 + 95
-  {0xA8, 0xC0, 0xEA, 0x8E, 0xE3, 0x24},   //   ...its other radio
-  {0xD4, 0x13, 0xF8, 0x43, 0xF0, 0xA8},   // Peplink "5Z36J", business by the drive 95 stop, marked "nothing"
-  {0xD4, 0x13, 0xF8, 0x80, 0x08, 0x49},   // Peplink, same business
-  {0x00, 0x30, 0x44, 0xDD, 0xDE, 0x04},   // Cradlepoint "TL_SDC_private", same business
-  {0xCC, 0x93, 0x4A, 0x1E, 0x72, 0xA6},   // Sierra Wireless, echo only, same business
-};
-constexpr size_t NUM_QUIET_MAC_TARGETS = sizeof(quietMacTargets) / sizeof(quietMacTargets[0]);
+// Fixed routers you have reviewed: QUIET_ROUTERS in secrets.h (kept out of
+// this public file because the places say where you drive and park). Each is
+// silent, but still logged, along with its sibling radios - only while the
+// GPS puts you within QUIET_RADIUS_M of where it was logged. Anywhere else,
+// or without a GPS fix, it alerts as usual, so a router that turns out to be
+// in a vehicle is not silenced on the road. A police-specific (HIGH)
+// signature on one always alerts. Format (the log server's Fixed routers tab
+// has a copy button for each):
+//   #define QUIET_ROUTERS "00:30:44:12:34:56@37.12345,-77.12345; D4:13:F8:..@.."
+#ifndef QUIET_ROUTERS
+  #define QUIET_ROUTERS ""
+#endif
+constexpr size_t QUIET_ROUTERS_MAX = 32;
+constexpr float  QUIET_RADIUS_M    = 300.0f;
+struct QuietRouter { uint8_t mac[6]; float lat; float lon; };
+QuietRouter quietRouters[QUIET_ROUTERS_MAX];
+size_t      numQuietRouters = 0;
 
 const char* const quietSsidTargets[] = {
   "IBR200-",   // kiosk / signage / ATM gateway, not a vehicle router
@@ -2361,13 +2361,50 @@ static bool macsAreSiblings(const uint8_t a[6], const uint8_t b[6]) {
   return (a[0] != b[0]) && ((a[0] | b[0]) & 0x02) && diff >= -7 && diff <= 7;
 }
 
+// Quiet only at its own spot: needs a fresh GPS fix within QUIET_RADIUS_M.
 static bool isQuietMac(const uint8_t mac[6]) {
-  for (size_t i = 0; i < NUM_QUIET_MAC_TARGETS; ++i) {
-    const uint8_t* q = quietMacTargets[i];
-    if (!(q[0] | q[1] | q[2] | q[3] | q[4] | q[5])) continue;     // placeholder
-    if (memcmp(q, mac, 6) == 0 || macsAreSiblings(q, mac)) return true;
+  if (numQuietRouters == 0) return false;
+  const uint32_t now = millis();
+  if (!gpsFixFresh(now)) return false;
+  const float lat = static_cast<float>(gps.lat), lon = static_cast<float>(gps.lon);
+  for (size_t i = 0; i < numQuietRouters; ++i) {
+    const QuietRouter& q = quietRouters[i];
+    if (memcmp(q.mac, mac, 6) != 0 && !macsAreSiblings(q.mac, mac)) continue;
+    const float dy = (lat - q.lat) * 111320.0f;
+    const float dx = (lon - q.lon) * 111320.0f * cosf(q.lat * 0.01745329f);
+    if (dx * dx + dy * dy <= QUIET_RADIUS_M * QUIET_RADIUS_M) return true;
   }
   return false;
+}
+
+// QUIET_ROUTERS: "MAC@lat,lon" entries separated by ';' (or new lines).
+static void parseQuietRouters(const char* list) {
+  numQuietRouters = 0;
+  size_t bad = 0;
+  const char* p = list;
+  while (*p) {
+    while (*p == ';' || *p == ' ' || *p == '\n' || *p == ',') ++p;
+    if (!*p) break;
+    unsigned m[6];
+    float lat = 0, lon = 0;
+    int used = 0;
+    if (sscanf(p, "%2x:%2x:%2x:%2x:%2x:%2x@%f,%f%n", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5],
+               &lat, &lon, &used) == 8 && used > 0 && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+        numQuietRouters < QUIET_ROUTERS_MAX) {
+      QuietRouter& q = quietRouters[numQuietRouters++];
+      for (int k = 0; k < 6; ++k) q.mac[k] = static_cast<uint8_t>(m[k]);
+      q.lat = lat;
+      q.lon = lon;
+      p += used;
+    } else {
+      ++bad;
+    }
+    while (*p && *p != ';' && *p != '\n') ++p;          // next entry
+  }
+  if (numQuietRouters || bad)
+    Console.printf("[INIT] Quiet routers: %u (silent only within %.0f m of their spot, with a GPS fix)%s\n",
+                   static_cast<unsigned>(numQuietRouters), QUIET_RADIUS_M,
+                   bad ? " - some QUIET_ROUTERS entries could not be read" : "");
 }
 
 // Is this address (or a sibling radio of it) currently silenced as a
@@ -6093,6 +6130,7 @@ void setup() {
   if (!validateSignatureDatabases()) {
     fatalInitError("Database sanity check failed");
   }
+  parseQuietRouters(QUIET_ROUTERS);    // before capture starts
 #if HOME_SYNC && defined(HOME_WIFI_BSSID)
   parseHomeBssids(HOME_WIFI_BSSID);   // read by the capture callback: fill it before promiscuous mode
 #endif

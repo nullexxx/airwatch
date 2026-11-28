@@ -149,7 +149,11 @@ def dist_m(a_lat, a_lon, b_lat, b_lon):
 class Store:
     def __init__(self, data_dir, vendors, log=print):
         self.data = data_dir
-        self.path = os.path.join(data_dir, "airwatch.db")
+        # AIRWATCH_DB: keep the index on a local disk when data/ is on NFS or
+        # SMB (SQLite's WAL mode needs local file locking). It is rebuilt from
+        # the raw uploads whenever it is missing, so a plain Docker volume is fine.
+        self.path = os.environ.get("AIRWATCH_DB") or os.path.join(data_dir, "airwatch.db")
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self.vendors = vendors
         self.log = log
         self.lock = threading.Lock()
@@ -441,9 +445,7 @@ class Store:
             lon = sum(p[2] for p in pts) / len(pts)
             spread = max(dist_m(lat, lon, p[1], p[2]) for p in pts)
             i = info.get(mac, {})
-            b = mac.split(":")
-            quiet = ("{" + ", ".join("0x" + x for x in b) + "},   // "
-                     + (i.get("ssid") or i.get("label") or "") + "  (quietMacTargets)")
+            quiet = f"{mac}@{lat:.5f},{lon:.5f};"     # one QUIET_ROUTERS entry (secrets.h)
             out.append({"mac": mac, "label": i.get("label"), "ssid": i.get("ssid"), "tier": i.get("tier"),
                         "vendor": self.vendor(mac), "drives": drives, "lat": round(lat, 5), "lon": round(lon, 5),
                         "spread_m": round(spread), "stationary": spread <= radius_m, "quiet": quiet})

@@ -466,6 +466,7 @@ The signature tables are near the top of `airwatch_v2.ino`:
 | `bleCompanyTargets`, `bleServiceTargets`, `bleNameTargets` | Bluetooth |
 | `ignoredSsidTargets` | Fire, EMS, transit and school fleets (silenced) |
 | `quietSsidTargets` | factory-named branch or kiosk routers: silent, but saved in marks and the journal |
+| `QUIET_ROUTERS` (in `secrets.h`) | routers you reviewed on the Fixed routers tab, each as `MAC@lat,lon;`. Silent (still logged) only within 300 m of that spot with a GPS fix, so one that is really in a vehicle still alerts anywhere else. Kept in `secrets.h` because the spots show where you drive |
 
 Some signatures are built into the code rather than a table:
 - the Axon body-camera tag (`AXON_BWC_TAG`);
